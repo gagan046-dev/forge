@@ -30,6 +30,23 @@ $base = "http://forge.localhost:8082"
 git add gitops/envs; git commit -m "chore: re-seal secrets"; git push
 ```
 
+### Pause vs delete: read this before "closing everything"
+
+| You want to | Do this | What survives |
+|---|---|---|
+| **Pause** (free RAM, keep everything) | `k3d cluster stop forge`, then quit Docker Desktop, then `wsl --shutdown` | Everything: models, Postgres data, workspaces, sealed-secrets key |
+| **Resume after a pause** | Start Docker Desktop, then `k3d cluster start forge` (or `up.ps1`, which also starts an existing cluster) | |
+| **Delete** (start clean) | `scripts\down.ps1` | Only `secrets\*.txt` and what is in Git. Models (~6 GB) are re-downloaded, the secrets must be re-sealed and pushed |
+
+Free RAM after a pause, step by step (PowerShell):
+
+```powershell
+k3d cluster stop forge
+Get-Process "Docker Desktop","com.docker.*" -ErrorAction SilentlyContinue | Stop-Process -Force
+wsl --shutdown                      # frees the WSL2 VM memory (Docker's 16 GB)
+wsl -l --running                    # "There are no running distributions" = done
+```
+
 Passwords: `secrets\prod-admin-password.txt`, `secrets\dev-admin-password.txt`. Do not paste their contents into chats or commits.
 
 ---
@@ -148,6 +165,30 @@ Create, revoke and edit limits (rpm, daily tokens) on **API keys**. Usage number
 
 ---
 
+## 5b. Chat attachments, Editor and Agent
+
+All in the web console, no commands needed:
+
+| Feature | Where | How |
+|---|---|---|
+| Attach files / a folder to a chat | **Chat** | **Attach files** / **Attach folder**, or drag onto the message box (24k characters max; binaries, `node_modules`, `.git`, files over 100 KB skipped) |
+| Workspaces (project folders) | **Editor** (`/workspace`) | **New workspace**: empty, or paste a `https://github.com/...` URL to clone |
+| Files | Editor, left panel | **+ File**, **+ Folder**, hover a row for **rename** / **×** delete; **Ctrl+S** saves |
+| Agent (Cursor-style) | Editor, **Agent** tab | Describe the task, review the proposed changes (diff per file), **Apply** / **Discard**; **auto-apply** skips review |
+| Single-file AI edit | Editor, **AI edit** tab | Describe a change to the open file, review the diff, **Apply**, then save |
+| Git | Editor, **Git** tab | Diff, commit (author name + email), push with a fine-grained token (Contents: read and write; never stored) |
+| ZIP | Editor, top bar | **Download ZIP** |
+
+The workspace API (`/api/workspaces/...`, SPEC section 2.9) needs the admin session, like every `/api` endpoint. Check its storage:
+
+```powershell
+kubectl -n forge-prod get pvc forge-workspaces                 # Bound, 5Gi, local-path
+kubectl -n forge-prod exec deploy/forge-gateway -- ls /workspaces
+kubectl -n forge-prod exec deploy/forge-gateway -- du -sh /workspaces
+```
+
+---
+
 ## 6. Changing models (GitOps)
 
 Edit `gitops\models.yaml` (alias, Ollama `name`, `role`, `contextLength` or `dimensions`), open a PR, merge. Then:
@@ -183,7 +224,22 @@ gh pr list
 gh pr merge <number> --squash
 ```
 
-Manual alternative: copy the `tag:` values from `values-dev-images.yaml` into `values-prod-images.yaml`, commit on a branch, open a PR, merge. CI status: `gh run list --workflow ci.yaml --limit 5`.
+Manual alternative (needed until the repo setting "Allow GitHub Actions to create and approve pull requests" is on), the way prod got `sha-fdf04f9`:
+
+```powershell
+git checkout main; git pull
+$tag = (Select-String 'sha-[0-9a-f]{7}' charts\forge\values-dev-images.yaml).Matches[0].Value
+git checkout -b "promote/prod-$tag"
+(Get-Content charts\forge\values-prod-images.yaml) -replace 'sha-[0-9a-f]{7}', $tag | Set-Content -Encoding utf8 charts\forge\values-prod-images.yaml
+git commit -am "chore(prod): promote images $tag"; git push -u origin "promote/prod-$tag"
+gh pr create --base main --title "Promote $tag to prod" --body "Verified on dev."
+gh pr checks --watch; gh pr merge --merge --delete-branch
+# then watch prod roll out
+kubectl -n argocd annotate app forge-prod argocd.argoproj.io/refresh=hard --overwrite
+kubectl -n forge-prod rollout status deploy/forge-gateway; kubectl -n forge-prod rollout status deploy/forge-web
+```
+
+ CI status: `gh run list --workflow ci.yaml --limit 5`.
 
 ---
 
@@ -294,4 +350,8 @@ Expected timeline after the last request: demand falls to 0 after 600 s, Ollama 
 | Answers cite wrong files | Small embedding model limit | Ask more specifically; raise `top_k` |
 | Web console shows login again | Session expired (12 h) or admin password changed | Log in again |
 | Changes pushed but cluster unchanged | Argo CD reads GitHub, not disk | Push; refresh apps (section 3) |
-| Cluster gone after Docker reset | Docker Desktop was reset or `down.ps1` ran | Re-run `up.ps1`, push re-sealed secrets |
+| Cluster gone after Docker reset | Docker Desktop was reset or `down.ps1` ran | Re-run `up.ps1`, push re-sealed secrets. To only pause next time, use `k3d cluster stop forge` |
+| Agent answers but no files appear | The 7B model wrote plain code instead of action blocks | Ask again ("write the files"); code blocks named by a file are picked up automatically and shown for review |
+| Agent says "not a file in this project" | It tried to read a library (e.g. `sklearn.datasets`) | Harmless; it continues. Only project files can be read |
+| Push fails "authentication failed" | Token missing, expired, without Contents: write, or repo does not exist | Create a fine-grained token for that repo with Contents read and write |
+| Workspace clone `400 invalid_url` | Host not allowed or not `https://` | Allowed: github.com, gitlab.com, codeberg.org |
