@@ -5,9 +5,9 @@ gateway:
   image:
     registry: ghcr.io
     repository: gagan046-dev/forge-gateway
-    tag: "sha-739c26b"
+    tag: "sha-8aa972d"
 web:
   image:
     registry: ghcr.io
     repository: gagan046-dev/forge-web
-    tag: "sha-739c26b"
+    tag: "sha-8aa972d"
