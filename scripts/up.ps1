@@ -84,6 +84,13 @@ Step "4/9 Node DNS fix and NVIDIA device plugin"
 $dnsFix = "/bin/k3d-entrypoint-zz-dns-fallback.sh"
 Run "docker cp cluster\k3d-entrypoint-zz-dns-fallback.sh ${ServerNode}:$dnsFix" "copying the DNS fix into $ServerNode failed"
 Run "docker exec $ServerNode sh -c `"chmod 0755 $dnsFix && $dnsFix`"" "running the DNS fix in $ServerNode failed"
+# Until CI has published sha-tagged images to GHCR, the charts use the local
+# forge-*:dev images. A k3d node has its own image store, so copy them in.
+$localImages = "forge-gateway:dev", "forge-web:dev", "forge-gpu-exporter:dev" | Where-Object { Quiet "docker image inspect $_" }
+if ($localImages) {
+    Info "importing local images into the cluster: $($localImages -join ', ')"
+    Run "k3d image import -c $ClusterName $($localImages -join ' ')" "k3d image import failed"
+}
 Run "kubectl --context $KubeContext apply -f cluster\device-plugin.yaml" "applying the device plugin failed"
 Run "kubectl --context $KubeContext -n kube-system rollout status ds/nvidia-device-plugin --timeout=300s" `
     "device plugin did not start (kubectl -n kube-system logs ds/nvidia-device-plugin)"

@@ -1,0 +1,13 @@
+---
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: forge-redis
+  namespace: forge-inference
+spec:
+  encryptedData:
+    redis-password: AgBWDgL9BOAECS+daK8VXUJ5+UVwAXvr5lL2QXwaZ9YxN6m3SY+gdeMHKjJbKyoUdXZ0DHeqeyRipXJkqsuMsUHzkanDkLcnR2OnZcwkeVJnlc8oI6kOrZXiAHAP2GZ8+l7b9uuSCpCGNKR81runPqnI0+6LbNetmgkFHfXvwzbIx9bjrHuO3TWyb+tX62sjTnMntawl4Z520gaxH18xXNdNifMQsUXNHLbbi8XoL5cN288gRr6TS8RwyOphy6xAwyncJtTWI7WiPS2ATFFUIRCmtfSdIs5NgEnicbnRNHUkOi5n2B5qJTh8Qc845EidP9h4nkGYdo8+tL5TN+MElKNAeLrkejbBWwpVZptpS8Dej7P/r9eSKHIvk3VP2dRUIWqxLhUg41gN2zzh2SFOYKGonhBWxWJF5sHCQDpHoQHpHpHSVSw2pqNqcHmtJmaHN3IRllA5y3+buEmDrZ+82kukqtDtKzNkTEse1IBHJg5WftehS32GZ8Os9JEZ6/Rf8+Yt+Q6d/jCUnxEuY6idDc5OzIJ+t1IwVS7KyLP9hAMIZ7zjhzaCcGy9/qLy7Q6rK0YeSQVQqOefiJVqFFtnHnG3wJZx+pnkMz/isCkiQ2zzn0x8RX5vAQGkm7HmMMtCcf/BL/SLJ6V9fIslIf/JYwcfoClCoCOlKECj1++W65yFY0QbgapwpQtP47vxM7vdB3NjCE6JAhvDkBsReZ5qUPo7c5T14JMhVI/7xL3wmRd1QJB1S7Wx6Z9X/yTQ
+  template:
+    metadata:
+      name: forge-redis
+      namespace: forge-inference

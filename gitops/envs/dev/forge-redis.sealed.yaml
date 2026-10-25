@@ -1,0 +1,13 @@
+---
+apiVersion: bitnami.com/v1alpha1
+kind: SealedSecret
+metadata:
+  name: forge-redis
+  namespace: forge-dev
+spec:
+  encryptedData:
+    redis-password: AgB2X2UgIj+aKLI7+KUbXHDXRCcNsBUbSvuw8gDG2zxpUE510fdnkEg0tnk3uB4mSkV9BQytS2o27Wl1S0XheVPMYkNqgvPdm2qwUbVGhOx8TO7oNoFSTwduEwZVXEzMlzdBju0pouFS42W8cI0YKEWYaFzLWCzrEkSc/x6jsJrY1EC8oY1mAv0t2hoVXqjl05JpTN2WFeGxDDpOQUtdFQNxJVjyZl00Tf8axdsOTPE/lpdtOxKA3kAXbGZ9mx35K7zEe50LdDC9Kj5QPf/K5217cY205mtagZmmbYyxlPO5seJnzxWJYa2gmjsoEJtIQlVEP+fORD8MuYj8tbz+Tp6OgGjrHfLw+HCf8ZMcxwDY5PxWiMzKor686abUABR9OVJtiPXasKjHdUdeo8FlvvmjplH0TOtarDKqgh8ZstI3pJFy4HrLPRu8t9QCiL+YQXYsGLR+8xOSslCRiNvjTCJOs/5PzTl7D6eZdeIGo4VNEWb0yEWqJkr+R1SSHlYYswa6BrhfsbNEqZiGqcmAWTHhF0oGGYMHOPcqsTftgZMogS+dPzBDP4SzJP/wWqGZOfGVcjexrXI1veY3k6BYMU1rJXZOzmKHvklbsbMmDw+qwpO8rnlpXRUHsuLsNkPCSxSJ3cEyoXLM/Myq2dCiEkqEOqn2WY94+sxLsfwXBH1GwoMIZ9fEewE8WKmuyA8xbwBTRK3ihwCO43ho5JKBLvovWdDIpJfLJY90eEcjMIRLz8W5kmYjf70QuSEM
+  template:
+    metadata:
+      name: forge-redis
+      namespace: forge-dev

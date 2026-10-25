@@ -79,7 +79,10 @@ function Initialize-Kubeseal {
         throw "kubeseal download checksum mismatch (got $hash) - refusing to use it"
     }
     # tar.exe ships with Windows 10 1803+ and Windows 11.
-    Run "tar -xzf `"$archive`" -C `"$KubesealDir`" kubeseal.exe" "could not unpack kubeseal"
+    # Use Windows' own bsdtar: GNU tar from Git for Windows (often first on PATH)
+    # reads "C:\..." as a remote host and fails with "Cannot connect to C:".
+    $tar = Join-Path $env:SystemRoot "System32\tar.exe"
+    Run "`"$tar`" -xzf `"$archive`" -C `"$KubesealDir`" kubeseal.exe" "could not unpack kubeseal"
     Remove-Item $archive -Force
     $env:PATH = "$KubesealDir;$env:PATH"
 }
