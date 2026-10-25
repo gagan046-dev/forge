@@ -155,6 +155,10 @@ foreach ($s in $SealedSecrets) {
     if ($code -ne 0 -or -not (Select-String -Path $out -Pattern "kind: SealedSecret" -Quiet)) {
         throw "sealing $($s.Namespace)/$($s.Name) failed: $err"
     }
+    # Argo CD must create the Secret before the workloads that use it: Postgres
+    # (wave -1) would otherwise wait forever for a Secret scheduled at wave 0.
+    $yaml = [IO.File]::ReadAllText($out) -replace "(?m)^metadata:\r?\n", "metadata:`n  annotations:`n    argocd.argoproj.io/sync-wave: `"-5`"`n"
+    [IO.File]::WriteAllText($out, $yaml, (New-Object Text.UTF8Encoding $false))
     Info "$($s.Out)  ($($s.Namespace)/$($s.Name))"
 }
 Move-Item -Force $certNow $certInUse
