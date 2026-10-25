@@ -78,6 +78,10 @@ class Settings(BaseSettings):
     default_daily_tokens: int = Field(default=2_000_000, ge=1)
     # Comma-separated host list; use `rag_allowed_hosts_list` for the parsed form.
     rag_allowed_hosts: str = "github.com,gitlab.com,codeberg.org"
+    # Editor workspaces (app/workspaces.py): one directory per workspace, on a PVC in the cluster.
+    workspace_root: str = "/tmp/forge-workspaces"  # noqa: S108 - local runs only; the chart sets a PVC
+    workspace_max_file_bytes: int = Field(default=1_000_000, ge=1)
+    workspace_max_bytes: int = Field(default=300_000_000, ge=1)
     log_level: str = "INFO"
 
     @cached_property

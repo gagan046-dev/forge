@@ -5,6 +5,7 @@ import type {
   Conversation,
   ConversationSummary,
   CreatedApiKey,
+  GitStatus,
   ModelsStatus,
   OpenAIModel,
   Repo,
@@ -12,6 +13,9 @@ import type {
   SystemStatus,
   Usage,
   UsageRange,
+  Workspace,
+  WorkspaceEntry,
+  WorkspaceFile,
 } from "./types";
 
 export const auth = {
@@ -62,4 +66,32 @@ export const repos = {
   create: (url: string, branch: string | null) => api.post<Repo>("/api/repos", { url, branch }),
   reindex: (id: number) => api.post<Repo>(`/api/repos/${id}/reindex`),
   remove: (id: number) => api.del(`/api/repos/${id}`),
+};
+
+const ws = (name: string) => `/api/workspaces/${encodeURIComponent(name)}`;
+const q = (path: string) => `path=${encodeURIComponent(path)}`;
+
+export const workspaces = {
+  list: () => api.get<Workspace[]>("/api/workspaces"),
+  create: (name: string, gitUrl: string | null, branch: string | null) =>
+    api.post<Workspace>("/api/workspaces", { name, git_url: gitUrl, branch }),
+  remove: (name: string) => api.del(ws(name)),
+  tree: (name: string) => api.get<{ entries: WorkspaceEntry[]; truncated: boolean }>(`${ws(name)}/tree`),
+  read: (name: string, path: string) => api.get<WorkspaceFile>(`${ws(name)}/file?${q(path)}`),
+  write: (name: string, path: string, content: string) => api.put<{ path: string; size: number }>(`${ws(name)}/file`, { path, content }),
+  mkdir: (name: string, path: string) => api.post<{ path: string }>(`${ws(name)}/folder`, { path }),
+  move: (name: string, from: string, to: string) => api.post<{ path: string }>(`${ws(name)}/move`, { from, to }),
+  removeEntry: (name: string, path: string) => api.del(`${ws(name)}/entry?${q(path)}`),
+  archiveUrl: (name: string) => `${ws(name)}/archive.zip`,
+  gitStatus: (name: string) => api.get<GitStatus>(`${ws(name)}/git`),
+  gitDiff: (name: string) => api.get<{ diff: string; truncated: boolean }>(`${ws(name)}/git/diff`),
+  setRemote: (name: string, url: string) => api.post<{ remote: string }>(`${ws(name)}/git/remote`, { url }),
+  commit: (name: string, message: string, authorName: string, authorEmail: string) =>
+    api.post<{ sha: string; summary: string }>(`${ws(name)}/git/commit`, {
+      message,
+      author_name: authorName,
+      author_email: authorEmail,
+    }),
+  push: (name: string, token: string | null) =>
+    api.post<{ pushed: boolean; branch: string; output: string }>(`${ws(name)}/git/push`, { token }),
 };

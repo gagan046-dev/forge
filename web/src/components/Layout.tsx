@@ -11,6 +11,7 @@ const NAV: { group: string; items: { to: string; label: string }[] }[] = [
     group: "Workspace",
     items: [
       { to: "/chat", label: "Chat" },
+      { to: "/workspace", label: "Editor" },
       { to: "/repos", label: "Ask repo" },
     ],
   },

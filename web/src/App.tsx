@@ -10,6 +10,7 @@ import { SystemPage } from "./pages/System";
 // Markdown + highlight.js and uPlot are most of the bundle; load them with the pages that use them.
 const ChatPage = lazy(() => import("./pages/Chat").then((m) => ({ default: m.ChatPage })));
 const AskRepoPage = lazy(() => import("./pages/AskRepo").then((m) => ({ default: m.AskRepoPage })));
+const WorkspacePage = lazy(() => import("./pages/Workspace").then((m) => ({ default: m.WorkspacePage })));
 const ConnectPage = lazy(() => import("./pages/Connect").then((m) => ({ default: m.ConnectPage })));
 const UsagePage = lazy(() => import("./pages/Usage").then((m) => ({ default: m.UsagePage })));
 
@@ -41,6 +42,8 @@ export function App() {
         <Route path="chat" element={lazyPage(<ChatPage />)} />
         <Route path="chat/:conversationId" element={lazyPage(<ChatPage />)} />
         <Route path="repos" element={lazyPage(<AskRepoPage />)} />
+        <Route path="workspace" element={lazyPage(<WorkspacePage />)} />
+        <Route path="workspace/:name" element={lazyPage(<WorkspacePage />)} />
         <Route path="keys" element={<KeysPage />} />
         <Route path="usage" element={lazyPage(<UsagePage />)} />
         <Route path="system" element={<SystemPage />} />

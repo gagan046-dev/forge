@@ -29,6 +29,27 @@ spec:
   ports:
     - {name: http, port: 8000, targetPort: http}
 ---
+# Editor workspaces (app/workspaces.py). ReadWriteOnce on local-path: the k3d cluster has a
+# single node, so both prod gateway replicas mount the same directory. On a multi-node cluster
+# this needs a ReadWriteMany class (or one gateway replica).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: forge-workspaces
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    # Same wave as the gateway: local-path binds only once a pod uses the claim
+    # (WaitForFirstConsumer), so an earlier wave would wait forever on a Pending PVC.
+    argocd.argoproj.io/sync-wave: "2"
+  labels:
+    {{- include "forge.labels" (dict "root" . "component" "gateway") | nindent 4 }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: {{ .Values.gateway.workspaces.storageClassName }}
+  resources:
+    requests:
+      storage: {{ .Values.gateway.workspaces.size }}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -65,7 +86,7 @@ spec:
       terminationGracePeriodSeconds: {{ .Values.gateway.terminationGracePeriodSeconds }}
       {{- include "forge.imagePullSecrets" . | nindent 6 }}
       securityContext:
-        {{- include "forge.podSecurity" (dict "uid" 10001) | nindent 8 }}
+        {{- include "forge.podSecurity" (dict "uid" 10001 "fsGroup" 10001) | nindent 8 }}
       topologySpreadConstraints:          # spread replicas if the cluster ever gets more nodes
         - maxSkew: 1
           topologyKey: kubernetes.io/hostname
@@ -109,9 +130,12 @@ spec:
               sleep: {seconds: 5}
           volumeMounts:
             - {name: tmp, mountPath: /tmp}         # root filesystem is read-only
+            - {name: workspaces, mountPath: /workspaces}
       volumes:
         - name: tmp
           emptyDir: {sizeLimit: {{ .Values.gateway.tmpSizeLimit }}}
+        - name: workspaces
+          persistentVolumeClaim: {claimName: forge-workspaces}
 {{- if .Values.gateway.pdb.enabled }}
 ---
 apiVersion: policy/v1

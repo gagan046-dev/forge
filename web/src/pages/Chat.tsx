@@ -6,6 +6,18 @@ import { streamChat } from "../api/stream";
 import type { ConversationSummary, OpenAIModel } from "../api/types";
 import { Markdown } from "../components/Markdown";
 import { EmptyState, ErrorBanner, useDocumentTitle } from "../components/ui";
+import {
+  composeMessage,
+  filesFromDrop,
+  filesFromInput,
+  MAX_TOTAL_CHARS,
+  parseMessage,
+  readAttachments,
+  totalChars,
+  type Attachment,
+  type PickedFile,
+  type SkippedFile,
+} from "../lib/attachments";
 import { uuid } from "../lib/browser";
 import { toModelMessages, toStoredMessages, toTurns, type Turn } from "../lib/conversation";
 import { formatDuration, formatInt, formatMs, formatRate, formatRelative } from "../lib/format";
@@ -44,6 +56,11 @@ export function ChatPage() {
   const [loadError, setLoadError] = useState<unknown>(null);
   const [saveError, setSaveError] = useState<unknown>(null);
   const [input, setInput] = useState("");
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [skipped, setSkipped] = useState<SkippedFile[]>([]);
+  const [dragging, setDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const [streaming, setStreaming] = useState(false);
   const [waitStart, setWaitStart] = useState<number | null>(null);
 
@@ -151,7 +168,7 @@ export function ChatPage() {
       const firstUser = finalTurns.find((t) => t.role === "user");
       try {
         await conversations.save(id, {
-          title: titleFrom(firstUser?.content ?? ""),
+          title: titleFrom(parseMessage(firstUser?.content ?? "").text),
           model,
           messages: toStoredMessages(preset.system, finalTurns),
         });
@@ -180,6 +197,8 @@ export function ChatPage() {
       const prior = [...base, userTurn];
       setTurns([...prior, { key: assistantKey, role: "assistant", content: "", pending: true }]);
       setInput("");
+      setAttachments([]);
+      setSkipped([]);
       setStreaming(true);
       setWaitStart(Date.now());
       stickToBottom.current = true;
@@ -247,8 +266,20 @@ export function ChatPage() {
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault();
-      void send(input, turns);
+      submit();
     }
+  };
+
+  const submit = () => {
+    if (input.trim()) void send(composeMessage(input, attachments), turns);
+  };
+
+  const attach = async (picked: PickedFile[]) => {
+    if (picked.length === 0) return;
+    const result = await readAttachments(picked, attachments);
+    setAttachments(result.attachments);
+    setSkipped(result.skipped);
+    inputRef.current?.focus();
   };
 
   const newChat = () => {
@@ -358,7 +389,7 @@ export function ChatPage() {
               <div className="turn-role">{t.role === "user" ? "you" : model || "assistant"}</div>
               <div className="turn-body">
                 {t.role === "user" ? (
-                  <div className="turn-user-text">{t.content}</div>
+                  <UserMessage content={t.content} />
                 ) : t.content ? (
                   <Markdown content={t.content} />
                 ) : t.pending ? (
@@ -380,9 +411,30 @@ export function ChatPage() {
           className="composer"
           onSubmit={(e) => {
             e.preventDefault();
-            void send(input, turns);
+            submit();
           }}
+          onDragOver={(e) => {
+            if (!e.dataTransfer.types.includes("Files")) return;
+            e.preventDefault();
+            setDragging(true);
+          }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragging(false);
+            void filesFromDrop(e.dataTransfer.items).then(attach);
+          }}
+          data-dragging={dragging || undefined}
         >
+          <AttachmentBar
+            attachments={attachments}
+            skipped={skipped}
+            onRemove={(path) => setAttachments((list) => list.filter((a) => a.path !== path))}
+            onClear={() => {
+              setAttachments([]);
+              setSkipped([]);
+            }}
+          />
           <textarea
             ref={inputRef}
             value={input}
@@ -395,7 +447,36 @@ export function ChatPage() {
           />
           <div className="composer-bar">
             <span className="muted small">
-              <kbd>Enter</kbd> send · <kbd>Shift</kbd>+<kbd>Enter</kbd> newline · <kbd>Esc</kbd> stop
+              <kbd>Enter</kbd> send · <kbd>Shift</kbd>+<kbd>Enter</kbd> newline · <kbd>Esc</kbd> stop · drop files here
+            </span>
+            <span className="composer-attach">
+              <button type="button" className="btn btn-small" onClick={() => fileInputRef.current?.click()} disabled={streaming}>
+                Attach files
+              </button>
+              <button type="button" className="btn btn-small" onClick={() => folderInputRef.current?.click()} disabled={streaming}>
+                Attach folder
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                hidden
+                onChange={(e) => {
+                  void attach(filesFromInput(e.target.files));
+                  e.target.value = "";
+                }}
+              />
+              <input
+                ref={folderInputRef}
+                type="file"
+                hidden
+                // Non-standard but supported by Chrome, Edge, Firefox and Safari.
+                {...{ webkitdirectory: "" }}
+                onChange={(e) => {
+                  void attach(filesFromInput(e.target.files));
+                  e.target.value = "";
+                }}
+              />
             </span>
             {streaming ? (
               <button type="button" className="btn" onClick={stop}>
@@ -471,3 +552,65 @@ function HistoryList({
   );
 }
 
+
+function UserMessage({ content }: { content: string }) {
+  const { text, attachments } = parseMessage(content);
+  return (
+    <>
+      {attachments.length > 0 && (
+        <div className="turn-files">
+          {attachments.map((a) => (
+            <details key={a.path} className="turn-file">
+              <summary className="mono">{a.path}</summary>
+              <pre>{a.content}</pre>
+            </details>
+          ))}
+        </div>
+      )}
+      <div className="turn-user-text">{text}</div>
+    </>
+  );
+}
+
+function AttachmentBar({
+  attachments,
+  skipped,
+  onRemove,
+  onClear,
+}: {
+  attachments: Attachment[];
+  skipped: SkippedFile[];
+  onRemove: (path: string) => void;
+  onClear: () => void;
+}) {
+  if (attachments.length === 0 && skipped.length === 0) return null;
+  const used = totalChars(attachments);
+  return (
+    <div className="attach-bar">
+      <ul className="attach-list">
+        {attachments.map((a) => (
+          <li key={a.path} className="attach-chip" title={`${formatInt(a.content.length)} characters`}>
+            <span className="mono">{a.path}</span>
+            <button type="button" onClick={() => onRemove(a.path)} aria-label={`Remove ${a.path}`}>
+              ×
+            </button>
+          </li>
+        ))}
+      </ul>
+      <div className="attach-meta muted small">
+        <span className="mono">
+          {attachments.length} file{attachments.length === 1 ? "" : "s"} · {formatInt(used)} / {formatInt(MAX_TOTAL_CHARS)} chars
+        </span>
+        {skipped.length > 0 && (
+          <span title={skipped.map((s) => `${s.path}: ${s.reason}`).join("\n")}>
+            {" "}
+            · skipped {skipped.length} ({[...new Set(skipped.map((s) => s.reason))].join(", ")})
+          </span>
+        )}
+        <button type="button" className="link-button" onClick={onClear}>
+          clear
+        </button>
+      </div>
+    </div>
+  );
+}

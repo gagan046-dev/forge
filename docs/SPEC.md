@@ -178,6 +178,24 @@ gateway/Dockerfile           python:3.12-slim based, non-root uid 10001, uvicorn
   - on failure, `event: error` with data `{"message":..}`.
   The prompt instructs the model to answer only from the sources and cite them as [n]. Retrieval uses cosine distance through pgvector (`<=>`).
 
+### 2.9 Workspaces (`gateway/app/workspaces.py`, router at `/api/workspaces`, admin session)
+A workspace is a directory under `FORGE_WORKSPACE_ROOT` (the `forge-workspaces` PVC at `/workspaces`). It is either empty (`git init -b main`) or a `--depth 1` clone that uses the RAG URL policy and git hardening. Names match `^[a-z0-9][a-z0-9._-]{0,63}$`. Paths are workspace-relative POSIX paths; absolute paths, `..`, `\`, `.git` and symlinks give 400 `invalid_path`.
+- `GET /api/workspaces` returns `[{"name","created_at","git":{"remote","branch"}}]`. `POST {"name","git_url"?,"branch"?}` returns 201 (409 if it exists, 400 `clone_failed`, 413 if over `FORGE_WORKSPACE_MAX_BYTES`). `DELETE /{name}` returns 204.
+- Files:
+  - `GET /{name}/tree` returns `{"entries":[{"path","type","size"}],"truncated"}`; `.git` is excluded and the list is capped at 5000.
+  - `GET /{name}/file?path=` returns `{"path","content","size"}`; 413 `file_too_large`, 415 `binary_file`.
+  - `PUT /{name}/file {"path","content"}` writes atomically and creates parent folders.
+  - `POST /{name}/folder {"path"}` returns 201.
+  - `POST /{name}/move {"from","to"}`.
+  - `DELETE /{name}/entry?path=` deletes a file, or a folder recursively.
+  - `GET /{name}/archive.zip` returns the files without `.git`, under a `{name}/` prefix.
+- Git:
+  - `GET /{name}/git` returns `{"branch","remote","head","changes":[{"path","status"}]}`.
+  - `GET /{name}/git/diff` returns `{"diff","truncated"}`, including untracked files (through a temporary index), capped at 200 KB.
+  - `POST /{name}/git/remote {"url"}` validates the URL against the policy.
+  - `POST /{name}/git/commit {"message","author_name","author_email"}` returns `{"sha","summary"}`, or 409 `nothing_to_commit`.
+  - `POST /{name}/git/push {"token"?}` pushes HEAD to `origin` with `-u`; 409 `no_remote`, 400 `push_failed`. The token reaches git only as an `http.extraHeader` through the `GIT_CONFIG_*` environment variables, so it is never on the command line, in logs or in error text.
+
 ## 3. Web UI (`web/`, React 18 + TypeScript + Vite, react-router; served by nginx-unprivileged on 8080)
 - Same origin as the gateway: ingress routes `/v1`, `/api`, `/internal` (blocked at ingress), `/metrics` (blocked) to the gateway, and `/` to web.
 - Every fetch sends `credentials: 'same-origin'` and `X-Forge-Csrf: 1`.

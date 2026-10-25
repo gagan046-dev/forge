@@ -169,3 +169,29 @@ export interface TokenUsage {
   completion_tokens?: number;
   total_tokens?: number;
 }
+
+/** Workspaces (the editor page): server-side folders, optionally git clones. */
+export interface Workspace {
+  name: string;
+  created_at: string;
+  git: { remote: string | null; branch: string | null };
+}
+
+export interface WorkspaceEntry {
+  path: string;
+  type: "file" | "dir";
+  size: number;
+}
+
+export interface WorkspaceFile {
+  path: string;
+  content: string;
+  size: number;
+}
+
+export interface GitStatus {
+  branch: string | null;
+  remote: string | null;
+  head: string | null;
+  changes: { path: string; status: string }[];
+}

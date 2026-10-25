@@ -63,6 +63,10 @@ gateway:
     limits: {cpu: "1", memory: 768Mi}     # RAG indexing holds up to 30 MB of source text
   # Scratch space for RAG "git clone --depth 1" (repos up to 30 MB of indexed files).
   tmpSizeLimit: 2Gi
+  # Editor workspaces (Workspace page): files, clones and their .git, kept across restarts.
+  workspaces:
+    size: 5Gi
+    storageClassName: local-path
   # Long SSE streams: give in-flight answers time to finish on rollout / scale-down.
   terminationGracePeriodSeconds: 60
   pdb:

@@ -25,6 +25,7 @@ from app.metering import DEMAND, INFLIGHT, QUEUE_DEPTH, Metering
 from app.rag.router import router as rag_router
 from app.routes import admin, internal, openai
 from app.scheduler import GpuScheduler, Priority
+from app.workspaces import router as workspaces_router
 
 log = logging.getLogger("app")
 
@@ -163,5 +164,6 @@ def create_app(
     app.include_router(openai.router)
     app.include_router(admin.router)
     app.include_router(rag_router)  # declares its own /api/repos prefix
+    app.include_router(workspaces_router)  # /api/workspaces
     app.include_router(internal.router)
     return app

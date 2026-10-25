@@ -24,4 +24,5 @@ data:
   FORGE_DEFAULT_RPM: {{ $c.defaultRpm | quote }}
   FORGE_DEFAULT_DAILY_TOKENS: {{ $c.defaultDailyTokens | int64 | quote }}
   FORGE_RAG_ALLOWED_HOSTS: {{ $c.ragAllowedHosts | quote }}
+  FORGE_WORKSPACE_ROOT: /workspaces          # the forge-workspaces PVC (templates/gateway.yaml)
   FORGE_LOG_LEVEL: {{ $c.logLevel | quote }}
