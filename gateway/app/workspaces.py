@@ -319,6 +319,36 @@ async def get_tree(request: Request, name: str) -> dict[str, Any]:
     return await asyncio.to_thread(_tree, _workspace_dir(request, name))
 
 
+MAX_SEARCH_HITS = 100
+MAX_SEARCH_FILE_BYTES = 512 * 1024
+
+
+def _search(workspace: Path, query: str) -> dict[str, Any]:
+    """Case-insensitive literal search over text files: what the editor agent uses to find code."""
+    needle = query.lower()
+    hits: list[dict[str, Any]] = []
+    for full, st in _walk(workspace):
+        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_SEARCH_FILE_BYTES:
+            continue
+        data = full.read_bytes()
+        if b"\x00" in data[:8000]:
+            continue
+        for number, line in enumerate(data.decode("utf-8", "replace").splitlines(), start=1):
+            if needle in line.lower():
+                rel = full.relative_to(workspace).as_posix()
+                hits.append({"path": rel, "line": number, "text": line.strip()[:200]})
+                if len(hits) >= MAX_SEARCH_HITS:
+                    return {"hits": hits, "truncated": True}
+    return {"hits": hits, "truncated": False}
+
+
+@router.get("/{name}/search")
+async def search(request: Request, name: str, q: Annotated[str, Query(min_length=1, max_length=200)]) -> dict[str, Any]:
+    result = await asyncio.to_thread(_search, _workspace_dir(request, name), q)
+    result["hits"].sort(key=lambda h: (h["path"], h["line"]))
+    return result
+
+
 @router.get("/{name}/file")
 async def read_file(request: Request, name: str, path: Annotated[str, Query(max_length=1000)]) -> dict[str, Any]:
     target = _resolve(_workspace_dir(request, name), path)

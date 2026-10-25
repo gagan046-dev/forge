@@ -82,6 +82,10 @@ export const workspaces = {
   mkdir: (name: string, path: string) => api.post<{ path: string }>(`${ws(name)}/folder`, { path }),
   move: (name: string, from: string, to: string) => api.post<{ path: string }>(`${ws(name)}/move`, { from, to }),
   removeEntry: (name: string, path: string) => api.del(`${ws(name)}/entry?${q(path)}`),
+  search: (name: string, query: string) =>
+    api.get<{ hits: { path: string; line: number; text: string }[]; truncated: boolean }>(
+      `${ws(name)}/search?q=${encodeURIComponent(query)}`,
+    ),
   archiveUrl: (name: string) => `${ws(name)}/archive.zip`,
   gitStatus: (name: string) => api.get<GitStatus>(`${ws(name)}/git`),
   gitDiff: (name: string) => api.get<{ diff: string; truncated: boolean }>(`${ws(name)}/git/diff`),

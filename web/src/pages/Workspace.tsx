@@ -5,10 +5,12 @@ import { listOpenAIModels, workspaces } from "../api/endpoints";
 import { streamChat } from "../api/stream";
 import type { GitStatus, OpenAIModel, Workspace, WorkspaceEntry } from "../api/types";
 import { CodeEditor } from "../components/CodeEditor";
+import { DiffView } from "../components/DiffView";
 import { EmptyState, ErrorBanner, useDocumentTitle } from "../components/ui";
 import { diffLines, diffStats, extractCode, foldUnchanged } from "../lib/diff";
 import { formatInt, formatRelative } from "../lib/format";
 import { useStoredState } from "../lib/useStoredState";
+import { AgentPanel } from "./WorkspaceAgent";
 
 const NAME_RE = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 /** Past this the 8k-token chat model can't hold the file, the instruction and a full rewrite. */
@@ -218,7 +220,7 @@ function WorkspaceEditor({ name, onGitChanged }: { name: string; onGitChanged: (
   const [draft, setDraft] = useState("");
   const [fileError, setFileError] = useState<unknown>(null);
   const [saving, setSaving] = useState(false);
-  const [side, setSide] = useStoredState<"ai" | "git">("forge.ws.side", "ai");
+  const [side, setSide] = useStoredState<"agent" | "ai" | "git">("forge.ws.side", "agent");
   const [gitTick, setGitTick] = useState(0);
 
   const dirty = file !== null && draft !== file.saved;
@@ -272,6 +274,34 @@ function WorkspaceEditor({ name, onGitChanged }: { name: string; onGitChanged: (
       setSaving(false);
     }
   }, [draft, file, name, refreshTree]);
+
+  // The agent's applied changes: refresh the tree and keep the open file in step.
+  const onAgentApplied = useCallback(
+    (changed: Map<string, string | null>) => {
+      refreshTree();
+      setGitTick((n) => n + 1);
+      if (file && changed.has(file.path)) {
+        const next = changed.get(file.path)!;
+        if (next === null) {
+          setFile(null);
+          setEditorValue("");
+          setDraft("");
+        } else {
+          setFile({ path: file.path, saved: next });
+          setEditorValue(next);
+          setDraft(next);
+        }
+      } else if (!file) {
+        const first = [...changed].find(([, v]) => v !== null);
+        if (first) {
+          setFile({ path: first[0], saved: first[1]! });
+          setEditorValue(first[1]!);
+          setDraft(first[1]!);
+        }
+      }
+    },
+    [file, refreshTree],
+  );
 
   const afterTreeChange = (removedOrMoved?: { from: string; to?: string }) => {
     if (removedOrMoved && file) {
@@ -332,6 +362,9 @@ function WorkspaceEditor({ name, onGitChanged }: { name: string; onGitChanged: (
 
       <aside className="ws-side">
         <div className="ws-tabs" role="tablist">
+          <button type="button" role="tab" aria-selected={side === "agent"} className={side === "agent" ? "active" : ""} onClick={() => setSide("agent")}>
+            Agent
+          </button>
           <button type="button" role="tab" aria-selected={side === "ai"} className={side === "ai" ? "active" : ""} onClick={() => setSide("ai")}>
             AI edit
           </button>
@@ -339,7 +372,10 @@ function WorkspaceEditor({ name, onGitChanged }: { name: string; onGitChanged: (
             Git
           </button>
         </div>
-        {side === "ai" ? (
+        <div className="ws-side-pane" hidden={side !== "agent"}>
+          <AgentPanel name={name} entries={entries} openFile={file ? { path: file.path, content: draft } : null} onApplied={onAgentApplied} />
+        </div>
+        {side === "agent" ? null : side === "ai" ? (
           <AiEditPanel
             file={file ? { path: file.path, content: draft } : null}
             onApply={(text) => {
@@ -715,25 +751,6 @@ function AiEditPanel({ file, onApply }: { file: { path: string; content: string 
         </div>
       )}
     </div>
-  );
-}
-
-function DiffView({ rows }: { rows: ReturnType<typeof foldUnchanged> }) {
-  return (
-    <pre className="diff">
-      {rows.map((r, i) =>
-        r.kind === "gap" ? (
-          <div key={i} className="diff-gap">
-            ⋯ {r.count} unchanged line{r.count === 1 ? "" : "s"}
-          </div>
-        ) : (
-          <div key={i} className={`diff-${r.kind}`}>
-            <span className="diff-sign">{r.kind === "add" ? "+" : r.kind === "del" ? "−" : " "}</span>
-            {r.text || " "}
-          </div>
-        ),
-      )}
-    </pre>
   );
 }
 

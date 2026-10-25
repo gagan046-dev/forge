@@ -202,3 +202,19 @@ def test_auth_failures_get_a_clear_push_message():
     exc = GitError("fatal: could not read Username for 'https://github.com': terminal prompts disabled")
     assert "authentication failed" in _git_failed("push_failed", exc).message
     assert "authentication failed" not in _git_failed("push_failed", GitError("rejected: non-fast-forward")).message
+
+
+async def test_search_finds_lines_case_insensitively(client):
+    await make(client)
+    code = "import os\ndef Health():\n    pass\n"
+    await client.put("/api/workspaces/demo/file", json={"path": "src/app.py", "content": code})
+    await client.put("/api/workspaces/demo/file", json={"path": "README.md", "content": "call health() here\n"})
+    body = (await client.get("/api/workspaces/demo/search", params={"q": "health"})).json()
+    assert body == {
+        "hits": [
+            {"path": "README.md", "line": 1, "text": "call health() here"},
+            {"path": "src/app.py", "line": 2, "text": "def Health():"},
+        ],
+        "truncated": False,
+    }
+    assert (await client.get("/api/workspaces/demo/search", params={"q": ""})).status_code == 400
