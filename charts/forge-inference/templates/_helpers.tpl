@@ -65,11 +65,12 @@ capabilities:
 {{- end -}}
 
 {{/*
-Hash of the models list. Part of the Ollama pod template (restart on change) and of
-the pull Job's name (a new Job per models list).
+Hash of the model tags Ollama serves. Part of the Ollama pod template (restart on change)
+and of the pull Job's name (a new Job per tag list). Only the tags count: gateway-side fields
+in models.yaml (aliases, context lengths, embedding prefixes) must not restart the GPU pod.
 */}}
 {{- define "fi.modelsChecksum" -}}
-{{- toJson .Values.models | sha256sum -}}
+{{- include "fi.modelNames" . | sha256sum -}}
 {{- end -}}
 
 {{/* Env shared by everything that runs an Ollama binary. */}}

@@ -4,12 +4,8 @@ import { keys, type KeyLimits } from "../api/endpoints";
 import type { ApiKey, CreatedApiKey } from "../api/types";
 import { CopyButton, EmptyState, ErrorBanner, PageHeader } from "../components/ui";
 import { formatCompact, formatDateTime, formatInt, formatRelative } from "../lib/format";
+import { LIMIT_BOUNDS, parseLimit } from "../lib/limits";
 import { usePolling } from "../lib/usePolling";
-
-function parseLimit(value: string): number | undefined {
-  const n = Number(value.replace(/[_,\s]/g, ""));
-  return value.trim() === "" || !Number.isFinite(n) ? undefined : Math.round(n);
-}
 
 export function KeysPage() {
   const list = usePolling(() => keys.list(), null);
@@ -63,7 +59,7 @@ export function KeysPage() {
         </EmptyState>
       ) : (
         <div className="table-wrap">
-          <table className="table">
+          <table className="table table-stack">
             <thead>
               <tr>
                 <th>Name</th>
@@ -113,14 +109,20 @@ function CreateKeyForm({ onCreated }: { onCreated: (k: CreatedApiKey) => void })
 
   const onSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    // Blank means "use the default"; anything else must be a valid limit, never silently dropped.
+    const r = parseLimit(rpm, LIMIT_BOUNDS.rpm);
+    const q = parseLimit(quota, LIMIT_BOUNDS.dailyTokens);
+    const invalid = [r.ok ? null : `Requests / min: ${r.error}`, q.ok ? null : `Daily tokens: ${q.error}`].filter(Boolean);
+    if (invalid.length > 0) {
+      setError(new Error(invalid.join(" ")));
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
       const limits: KeyLimits = {};
-      const r = parseLimit(rpm);
-      const q = parseLimit(quota);
-      if (r !== undefined) limits.rpm_limit = r;
-      if (q !== undefined) limits.daily_token_quota = q;
+      if (r.ok && r.value !== null) limits.rpm_limit = r.value;
+      if (q.ok && q.value !== null) limits.daily_token_quota = q.value;
       onCreated(await keys.create(name.trim(), limits));
       setName("");
       setRpm("");
@@ -161,6 +163,7 @@ function KeyRow({ apiKey: k, onChanged }: { apiKey: ApiKey; onChanged: () => voi
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const revoked = k.revoked_at !== null;
+  const limited = k.limited !== false;
 
   const run = async (fn: () => Promise<unknown>) => {
     setBusy(true);
@@ -177,43 +180,60 @@ function KeyRow({ apiKey: k, onChanged }: { apiKey: ApiKey; onChanged: () => voi
   };
 
   const save = () => {
-    const r = parseLimit(rpm);
-    const q = parseLimit(quota);
-    if (r === undefined || q === undefined || r < 1 || q < 1) {
-      setError(new Error("Limits must be positive whole numbers."));
+    const r = parseLimit(rpm, LIMIT_BOUNDS.rpm);
+    const q = parseLimit(quota, LIMIT_BOUNDS.dailyTokens);
+    const rpmLimit = r.ok ? r.value : null;
+    const dailyQuota = q.ok ? q.value : null;
+    if (rpmLimit === null || dailyQuota === null) {
+      const rError = r.ok ? "required." : r.error;
+      const qError = q.ok ? "required." : q.error;
+      const parts = [rpmLimit === null && `Requests / min: ${rError}`, dailyQuota === null && `Daily tokens: ${qError}`];
+      setError(new Error(parts.filter(Boolean).join(" ")));
       return;
     }
-    void run(() => keys.update(k.id, { rpm_limit: r, daily_token_quota: q }));
+    void run(() => keys.update(k.id, { rpm_limit: rpmLimit, daily_token_quota: dailyQuota }));
   };
 
   return (
     <>
       <tr className={revoked ? "row-muted" : ""}>
-        <td>
+        <td className="cell-title">
           {k.name}
           {k.builtin && <span className="tag">built-in</span>}
           {revoked && <span className="tag tag-failed">revoked</span>}
         </td>
-        <td className="mono">{k.prefix ? `${k.prefix}…` : <span className="muted">session</span>}</td>
+        <td className="mono" data-label="Key">
+          {k.prefix ? `${k.prefix}…` : <span className="muted">session</span>}
+        </td>
         {mode === "edit" ? (
           <>
-            <td className="num">
+            <td className="num" data-label="RPM">
               <input className="cell-input" inputMode="numeric" value={rpm} onChange={(e) => setRpm(e.target.value)} aria-label="Requests per minute" />
             </td>
-            <td className="num">
+            <td className="num" data-label="Daily tokens">
               <input className="cell-input" inputMode="numeric" value={quota} onChange={(e) => setQuota(e.target.value)} aria-label="Daily token quota" />
             </td>
           </>
+        ) : !limited ? (
+          <td colSpan={2} className="num muted" data-label="Limits" title="The admin session is metered but never limited">
+            not limited
+          </td>
         ) : (
           <>
-            <td className="num mono">{formatInt(k.rpm_limit)}</td>
-            <td className="num mono" title={formatInt(k.daily_token_quota)}>
+            <td className="num mono" data-label="RPM">
+              {formatInt(k.rpm_limit)}
+            </td>
+            <td className="num mono" data-label="Daily tokens" title={formatInt(k.daily_token_quota)}>
               {formatCompact(k.daily_token_quota)}
             </td>
           </>
         )}
-        <td title={formatDateTime(k.created_at)}>{formatRelative(k.created_at)}</td>
-        <td title={formatDateTime(k.last_used_at)}>{formatRelative(k.last_used_at)}</td>
+        <td data-label="Created" title={formatDateTime(k.created_at)}>
+          {formatRelative(k.created_at)}
+        </td>
+        <td data-label="Last used" title={formatDateTime(k.last_used_at)}>
+          {formatRelative(k.last_used_at)}
+        </td>
         <td className="row-actions">
           {revoked ? (
             <span className="muted small">{formatRelative(k.revoked_at)}</span>
@@ -237,17 +257,19 @@ function KeyRow({ apiKey: k, onChanged }: { apiKey: ApiKey; onChanged: () => voi
             </>
           ) : (
             <>
-              <button
-                type="button"
-                className="btn btn-small"
-                onClick={() => {
-                  setRpm(String(k.rpm_limit));
-                  setQuota(String(k.daily_token_quota));
-                  setMode("edit");
-                }}
-              >
-                Edit limits
-              </button>
+              {limited && (
+                <button
+                  type="button"
+                  className="btn btn-small"
+                  onClick={() => {
+                    setRpm(String(k.rpm_limit));
+                    setQuota(String(k.daily_token_quota));
+                    setMode("edit");
+                  }}
+                >
+                  Edit limits
+                </button>
+              )}
               {!k.builtin && (
                 <button type="button" className="btn btn-small" onClick={() => setMode("confirm-revoke")}>
                   Revoke

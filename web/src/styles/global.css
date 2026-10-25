@@ -18,7 +18,7 @@
   --border-strong: #c9c9c3;
   --text: #1c1c1a;
   --text-muted: #66665f;
-  --text-faint: #96968e;
+  --text-faint: #6e6e68;
   --grid: #ebebe6;
 
   /* The one accent: forge orange. */
@@ -51,7 +51,7 @@
     --border-strong: #3a3b3f;
     --text: #e4e4e0;
     --text-muted: #94948d;
-    --text-faint: #66665f;
+    --text-faint: #8a8a83;
     --grid: #222326;
 
     --accent: #ee8a3c;
@@ -735,8 +735,13 @@ textarea:disabled {
 .kv dd {
   margin: 0;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+}
+.kv dd code {
+  overflow-wrap: anywhere;
 }
 .kv-inline {
   display: flex;
@@ -806,6 +811,9 @@ textarea:disabled {
   border-radius: var(--radius);
   white-space: nowrap;
   z-index: 2;
+}
+.chart-tip-left {
+  transform: translate(calc(-100% - 12px), -50%);
 }
 .chart-tip-time {
   color: var(--text-muted);
@@ -1106,6 +1114,11 @@ textarea:disabled {
   flex-direction: column;
   min-height: 0;
   border-right: 1px solid var(--border);
+}
+/* Shown only on narrow screens, where the history is a drawer. */
+.history-toggle,
+.history-backdrop {
+  display: none;
 }
 .chat-history-head {
   display: flex;
@@ -1556,10 +1569,32 @@ textarea:disabled {
 
 @media (max-width: 1000px) {
   .chat {
+    position: relative;
     grid-template-columns: minmax(0, 1fr);
   }
   .chat-history {
     display: none;
+  }
+  .history-toggle {
+    display: inline-flex;
+  }
+  .chat.history-open .chat-history {
+    display: flex;
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 20;
+    width: min(300px, 86vw);
+    background: var(--surface);
+  }
+  .chat.history-open .history-backdrop {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: 19;
+    background: var(--bg);
+    opacity: 0.6;
   }
   .split {
     grid-template-columns: minmax(0, 1fr);
@@ -1575,35 +1610,50 @@ textarea:disabled {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);
   }
+  /* Top bar: brand, backend state and sign-out on the first row, the nav wrapping below it,
+     so every item stays on screen without sideways scrolling. */
   .sidebar {
     flex-direction: row;
+    flex-wrap: wrap;
     align-items: center;
     border-right: 0;
     border-bottom: 1px solid var(--border);
-    overflow-x: auto;
   }
   .brand {
     border-bottom: 0;
   }
   .nav {
+    order: 3;
+    flex: 1 0 100%;
     display: flex;
-    padding: 0;
+    flex-wrap: wrap;
+    padding: 0 4px;
     overflow: visible;
+    border-top: 1px solid var(--border);
   }
   .nav-group {
     display: flex;
+    flex-wrap: wrap;
   }
   .nav-group + .nav-group {
     margin-top: 0;
   }
-  .nav-heading,
-  .foot-status {
+  .nav-heading {
     display: none;
   }
   .sidebar-foot {
+    flex-direction: row;
+    align-items: center;
+    gap: 12px;
     border-top: 0;
     margin-left: auto;
     padding: 0 14px;
+  }
+  .foot-status .mono {
+    display: none;
+  }
+  .link-button {
+    white-space: nowrap;
   }
   .nav-link {
     border-left: 0;
@@ -1626,5 +1676,56 @@ textarea:disabled {
   }
   .panels {
     grid-template-columns: minmax(0, 1fr);
+  }
+  /* Connect: label above value, so long values and their Copy buttons fit. */
+  .kv {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+  .kv dd + dt {
+    margin-top: 8px;
+  }
+  /* Wide tables (API keys) become one block per row, each cell labelled. */
+  .table.table-stack thead {
+    display: none;
+  }
+  .table.table-stack,
+  .table.table-stack tbody,
+  .table.table-stack tr {
+    display: block;
+  }
+  .table.table-stack tr {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .table.table-stack tbody tr:last-child {
+    border-bottom: 0;
+  }
+  .table.table-stack td,
+  .table.table-stack td.row-actions {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    padding: 2px 0;
+    border-bottom: 0;
+    white-space: normal;
+    text-align: left;
+  }
+  .table.table-stack td[data-label]::before {
+    content: attr(data-label);
+    color: var(--text-muted);
+    font-family: var(--font-sans);
+    font-size: 12px;
+  }
+  .table.table-stack td.cell-title {
+    font-weight: 500;
+  }
+  .table.table-stack td.row-actions {
+    justify-content: flex-start;
+    padding-top: 6px;
+  }
+  .table.table-stack tbody tr:hover td {
+    background: none;
   }
 }

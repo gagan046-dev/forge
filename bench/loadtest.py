@@ -40,6 +40,18 @@ from pathlib import Path
 
 import httpx
 
+
+def connection_hint(base_url: str, exc: Exception) -> str:
+    """Explain the usual cause when a *.localhost name does not resolve on Windows."""
+    host = httpx.URL(base_url).host
+    if isinstance(exc, httpx.ConnectError) and host.endswith(".localhost") and "getaddrinfo" in str(exc):
+        return (
+            f"\n  Windows does not resolve {host} for programs other than browsers. Run "
+            "scripts\\add-hosts.ps1 from an Administrator PowerShell (it maps the Forge names to 127.0.0.1)."
+        )
+    return ""
+
+
 DEFAULT_BASE_URL = "http://forge.localhost:8082/v1"
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 
@@ -403,7 +415,7 @@ def main() -> int:
     try:
         asyncio.run(run())
     except httpx.HTTPError as exc:
-        print(f"cannot talk to Forge at {cfg.base_url}: {exc}", file=sys.stderr)
+        print(f"cannot talk to Forge at {cfg.base_url}: {exc}{connection_hint(cfg.base_url, exc)}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print("interrupted - reporting what finished", file=sys.stderr)

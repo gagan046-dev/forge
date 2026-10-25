@@ -33,7 +33,7 @@ function formatBucket(t: number, bucketSeconds: number): string {
  */
 export function TimeSeriesChart({ xs, ys, label, format, bucketSeconds, kind, height = 168 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
-  const [hover, setHover] = useState<{ left: number; top: number; t: number; v: number } | null>(null);
+  const [hover, setHover] = useState<{ left: number; top: number; t: number; v: number; flip: boolean } | null>(null);
   const [scheme, setScheme] = useState(() => window.matchMedia("(prefers-color-scheme: dark)").matches);
 
   useEffect(() => {
@@ -91,8 +91,10 @@ export function TimeSeriesChart({ xs, ys, label, format, bucketSeconds, kind, he
               setHover(null);
               return;
             }
-            // Pin the readout to the top of the plot so it never covers the axis labels.
-            setHover({ left: left + u.bbox.left / devicePixelRatio, top: u.bbox.top / devicePixelRatio + 18, t, v });
+            // Pin the readout to the top of the plot so it never covers the axis labels, and
+            // flip it to the cursor's left in the right half so it stays inside the panel.
+            const x = left + u.bbox.left / devicePixelRatio;
+            setHover({ left: x, top: u.bbox.top / devicePixelRatio + 18, t, v, flip: x > u.width / 2 });
           },
         ],
       },
@@ -111,7 +113,7 @@ export function TimeSeriesChart({ xs, ys, label, format, bucketSeconds, kind, he
     <div className="chart" onMouseLeave={() => setHover(null)}>
       <div ref={hostRef} className="chart-canvas" />
       {hover && (
-        <div className="chart-tip" style={{ left: hover.left, top: hover.top }}>
+        <div className={`chart-tip${hover.flip ? " chart-tip-left" : ""}`} style={{ left: hover.left, top: hover.top }}>
           <div className="chart-tip-time">{formatBucket(hover.t, bucketSeconds)}</div>
           <div>
             <span className="muted">{label}</span> <span className="mono">{format(hover.v)}</span>

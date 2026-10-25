@@ -76,6 +76,14 @@ follow from that:
 - `useLegacyCompletionsEndpoint: true` states explicitly that this model is served by
   `/v1/completions` (it is a base model, it has no chat template).
 
+**The autocomplete model must be a base model.** Because Continue sends the raw FIM prompt with no
+`suffix` field, Ollama runs it through the model's own prompt template. A base model's template
+passes the text through unchanged; an instruct model's template wraps it as a chat message, and the
+model then answers like a chat ("Certainly! Below is...", markdown fences, the whole file repeated)
+instead of filling the gap. Measured with `qwen2.5-coder:7b` (instruct): 9 of 15 completions were
+chat prose. So if you change `forge-autocomplete` in `gitops/models.yaml`, pick a `-base` tag (for
+example `qwen2.5-coder:1.5b-base` or `qwen2.5-coder:7b-base`), never an instruct one.
+
 Either way the request goes through Forge's autocomplete path: the `autocomplete` role gives it the
 highest GPU-queue priority, and a newer keystroke's request supersedes the same key's older queued
 one, so typing stays responsive while chat or embedding work is running.

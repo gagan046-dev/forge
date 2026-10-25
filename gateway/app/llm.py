@@ -10,9 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import httpx
 from fastapi import Request
@@ -26,6 +26,9 @@ from app.metering import CallRecord, Metering, estimate_tokens
 from app.scheduler import GpuScheduler, Priority
 
 log = logging.getLogger(__name__)
+
+UNKNOWN_MODEL = "unknown"
+EmbedInput = Literal["document", "query"]
 
 
 def _upstream_message(raw: bytes) -> str:
@@ -95,9 +98,13 @@ class LLM:
 
     # ---- model lookup ----------------------------------------------------------------------
 
+    def lookup(self, model: str) -> ModelSpec | None:
+        """A configured model by alias or by its Ollama name, or None."""
+        return self._by_key.get(model)
+
     def resolve(self, model: str) -> ModelSpec:
-        """Find a configured model by alias or by its Ollama name."""
-        spec = self._by_key.get(model)
+        """Find a configured model by alias or by its Ollama name; 400 model_not_found if unknown."""
+        spec = self.lookup(model)
         if spec is None:
             known = ", ".join(m.alias for m in self.models)
             raise invalid_request(f"Unknown model '{model}'. Available: {known}", code="model_not_found")
@@ -122,7 +129,6 @@ class LLM:
             await self.backend.ensure_ready()
             async with self.scheduler.slot(priority, principal.key_id, endpoint) as slot:
                 record.queue_ms = slot.queue_ms
-                record.mark_upstream_start()
                 yield record
         except ForgeError as err:
             record.fail(err.status, err.type)
@@ -150,9 +156,16 @@ class LLM:
         await self.metering.record(principal, record)
         await self.backend.touch()  # idle time counts from the end of the last request
 
-    async def record_rejection(self, principal: Principal, *, endpoint: str, model: str, err: ForgeError) -> None:
-        """Usage event for a request refused before it reached the queue (bad model, bad body)."""
-        record = CallRecord(endpoint=endpoint, model=model or "unknown")
+    async def record_rejection(
+        self, principal: Principal, *, endpoint: str, spec: ModelSpec | None, err: ForgeError
+    ) -> None:
+        """Usage event for a request refused before it reached the queue (bad model, bad body).
+
+        Models that don't resolve are all recorded as "unknown": the request's model string is
+        client input, and using it as a metric label or usage row would let any key holder create
+        unlimited Prometheus series by sending random names.
+        """
+        record = CallRecord(endpoint=endpoint, model=spec.alias if spec else UNKNOWN_MODEL)
         record.fail(err.status, err.type)
         await self.metering.record(principal, record)
 
@@ -256,18 +269,30 @@ class LLM:
     # ---- stable internal API (used by app.rag) ---------------------------------------------
 
     async def embed(
-        self, texts: list[str], *, principal: Principal, priority: Priority = Priority.BATCH
+        self,
+        texts: list[str],
+        *,
+        principal: Principal,
+        priority: Priority = Priority.BATCH,
+        input_type: EmbedInput | None = None,
     ) -> list[list[float]]:
+        """Embed texts with the embedding model.
+
+        `input_type` adds the model's task prefix from models.yaml (documentPrefix/queryPrefix):
+        retrieval models like nomic-embed-text are trained to see "search_document: " on indexed
+        text and "search_query: " on questions, and match noticeably worse without them.
+        """
         if not texts:
             return []
         spec = self.resolve(self.alias_for_role("embedding"))
+        prefix = {"document": spec.document_prefix, "query": spec.query_prefix}.get(input_type or "", "")
         data, _ = await self.request_json(
             principal,
             endpoint="rag",
             spec=spec,
             priority=priority,
             path="/v1/embeddings",
-            body={"model": spec.name, "input": texts},
+            body={"model": spec.name, "input": [prefix + t for t in texts]},
             prompt_estimate=sum(estimate_tokens(t) for t in texts),
         )
         items = sorted(data.get("data") or [], key=lambda item: item.get("index", 0))
@@ -275,7 +300,7 @@ class LLM:
             raise ForgeError(502, "upstream_error", f"Expected {len(texts)} embeddings, got {len(items)}")
         return [item["embedding"] for item in items]
 
-    async def stream_chat(
+    def stream_chat(
         self,
         messages: list[dict],
         *,
@@ -284,8 +309,11 @@ class LLM:
         priority: Priority = Priority.CHAT,
         max_tokens: int | None = None,
         temperature: float = 0.2,
-    ) -> AsyncIterator[str]:
-        """Yield the answer's text deltas. Raises ForgeError subclasses like the /v1 routes."""
+    ) -> ChatStream:
+        """Iterate the answer's text deltas. Raises ForgeError subclasses like the /v1 routes.
+
+        The returned stream's `usage` holds the token counts once it has been read to the end.
+        """
         spec = self.resolve(model_alias)
         body: dict[str, Any] = {
             "model": spec.name,
@@ -296,22 +324,54 @@ class LLM:
         }
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
-        _, chunks = await self.open_stream(
-            principal,
-            endpoint="rag",
-            spec=spec,
-            priority=priority,
-            path="/v1/chat/completions",
-            body=body,
-            prompt_estimate=sum(estimate_tokens(str(m.get("content") or "")) for m in messages),
+        return ChatStream(
+            lambda: self.open_stream(
+                principal,
+                endpoint="rag",
+                spec=spec,
+                priority=priority,
+                path="/v1/chat/completions",
+                body=body,
+                prompt_estimate=sum(estimate_tokens(str(m.get("content") or "")) for m in messages),
+            )
         )
+
+
+_OpenStream = tuple[CallRecord, AsyncGenerator[dict[str, Any], None]]
+
+
+class ChatStream:
+    """Async iterator of text deltas from one streamed chat call (see LLM.stream_chat)."""
+
+    def __init__(self, open_stream: Callable[[], Awaitable[_OpenStream]]) -> None:
+        self.usage: dict[str, int] | None = None
+        # Opened on first iteration, so a stream that is never read never queues for the GPU.
+        self._deltas = self._run(open_stream)
+
+    def __aiter__(self) -> ChatStream:
+        return self
+
+    async def __anext__(self) -> str:
+        return await anext(self._deltas)
+
+    async def aclose(self) -> None:
+        await self._deltas.aclose()
+
+    async def _run(self, open_stream: Callable[[], Awaitable[_OpenStream]]) -> AsyncGenerator[str, None]:
+        record, chunks = await open_stream()
         try:
             async for chunk in chunks:
                 text = chunk_text(chunk)
                 if text:
                     yield text
         finally:
-            await chunks.aclose()
+            await chunks.aclose()  # releases the GPU slot and writes the usage event
+        # Only reached when the answer finished; the counts are Ollama's (or estimated).
+        self.usage = {
+            "prompt_tokens": record.prompt_tokens,
+            "completion_tokens": record.completion_tokens,
+            "total_tokens": record.prompt_tokens + record.completion_tokens,
+        }
 
 
 def get_llm(request: Request) -> LLM:

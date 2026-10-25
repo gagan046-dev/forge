@@ -31,7 +31,7 @@ async def test_usage_aggregates_totals_keys_models_and_latency(gateway, bearer):
     by_model = {m["model"]: m for m in usage["by_model"]}
     assert by_model["forge-chat"]["requests"] == 2
     assert by_model["forge-embed"]["prompt_tokens"] == 6
-    assert by_model["nope"]["errors"] == 1
+    assert by_model["unknown"]["errors"] == 1  # unknown model names share one bucket
     assert by_model["forge-chat"]["p50_ms"] is not None
 
     assert len(usage["timeseries"]) in (24, 25)  # hourly buckets, both ends included

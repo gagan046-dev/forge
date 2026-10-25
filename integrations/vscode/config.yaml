@@ -28,6 +28,8 @@ models:
   # renders the fill-in-the-middle prompt itself and streams it to /v1/completions.
   # It picks the FIM format from the model name, and "forge-autocomplete" says
   # nothing about Qwen, so the Qwen2.5-Coder FIM template is set explicitly.
+  # forge-autocomplete must be a BASE model (see README): an instruct model turns this
+  # raw FIM prompt into a chat answer.
   - name: Forge Autocomplete
     provider: openai
     model: forge-autocomplete

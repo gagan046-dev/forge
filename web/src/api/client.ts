@@ -114,6 +114,10 @@ export function toApiError(status: number, bodyText: string, headers: Headers): 
   });
 }
 
+function withPeriod(text: string): string {
+  return /[.!?]$/.test(text) ? text : `${text}.`;
+}
+
 /** A short, human explanation of an error, suitable for an inline banner. */
 export function describeError(err: unknown): string {
   if (!(err instanceof ApiError)) {
@@ -135,7 +139,8 @@ export function describeError(err: unknown): string {
     case "queue_timeout":
       return "Waited too long for a GPU slot. The queue is busy; try again shortly.";
     default:
-      return err.message;
+      // Any other refusal that says when to come back (another proxy's 429, a 503) gets the hint too.
+      return retry && (err.status === 429 || err.status === 503) ? `${withPeriod(err.message)}${retry}` : err.message;
   }
 }
 

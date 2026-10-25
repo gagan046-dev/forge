@@ -58,7 +58,16 @@ if ($unresolved) {
             Start-Process powershell -Verb RunAs -Wait -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$addHosts`""
         }
     } catch {
-        Warn "hosts file not updated ($($_.Exception.Message)). Browsers still work; for the SDK, curl and VS Code run scripts\add-hosts.ps1 as Administrator."
+        Warn "hosts file not updated ($($_.Exception.Message))."
+    }
+    # The elevated window's own errors (or a declined UAC prompt) don't reach this script, so
+    # check the result instead of assuming it worked.
+    $stillUnresolved = $HostNames | Where-Object {
+        try { [Net.Dns]::GetHostAddresses($_) | Out-Null; $false } catch { $true }
+    }
+    if ($stillUnresolved) {
+        Warn ("Windows still does not resolve $($stillUnresolved -join ', '). Browsers still work; for the SDK, " +
+              "curl, bench\*.py and VS Code run scripts\add-hosts.ps1 from an Administrator PowerShell.")
     }
 }
 

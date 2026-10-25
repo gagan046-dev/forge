@@ -82,16 +82,17 @@ gateway/Dockerfile           python:3.12-slim based, non-root uid 10001, uvicorn
 ### 2.2 Auth
 - API key format: `fk_` + 40 chars from `secrets.token_urlsafe`. Stored as SHA-256 hex `key_hash`, plus `prefix` (first 10 chars) for display. The plain key is returned only once, at creation.
 - `Authorization: Bearer <key>` on `/v1/*`. Revoked or unknown keys get 401.
-- Admin session: `POST /api/auth/login {"password"}` compares with `FORGE_ADMIN_PASSWORD` (constant-time), then sets an HttpOnly, SameSite=Lax cookie `forge_session` (signed with itsdangerous using `FORGE_SESSION_SECRET`, 12 h). Login attempts are rate-limited (5 per minute per IP via Redis).
+- Admin session: `POST /api/auth/login {"password"}` compares with `FORGE_ADMIN_PASSWORD` (constant-time), then sets an HttpOnly, SameSite=Lax cookie `forge_session` (signed with itsdangerous using `FORGE_SESSION_SECRET`, 12 h). Login attempts are rate-limited (5 failed attempts per minute per IP via Redis; successful logins don't count). The token carries a random session id; logout revokes it in Redis, so a copied cookie stops working too.
 - `require_principal`: a Bearer key, OR an admin session cookie. A session is attributed to a built-in key row named `web-console` (created at startup if missing; it has no usable hash and can't be revoked). This lets the web UI call `/v1/*` with the cookie.
 - CSRF: for cookie-authenticated state-changing requests, require header `X-Forge-Csrf: 1`. The SPA always sends it; cross-site forms cannot.
 
 ### 2.3 OpenAI-compatible API (`/v1`)
 - `GET /v1/models` → `{"object":"list","data":[{"id":alias,"object":"model","owned_by":"forge","role":...}]}`. Raw Ollama names are also accepted in requests if they are in FORGE_MODELS_JSON.
-- `POST /v1/chat/completions`: OpenAI body; `stream` true/false. Map the alias to the Ollama name, forward to Ollama `/v1/chat/completions`. When streaming, set `stream_options: {"include_usage": true}` upstream, pass SSE chunks through unchanged (with model rewritten back to the alias), and read the usage chunk for metering. Priority: CHAT.
+- `POST /v1/chat/completions`: OpenAI body; `stream` true/false. Map the alias to the Ollama name, forward to Ollama `/v1/chat/completions`. When streaming, set `stream_options: {"include_usage": true}` upstream, pass SSE chunks through unchanged (with model rewritten back to the alias), and read the usage chunk for metering; the usage-only chunk is forwarded only if the client itself asked for `include_usage`, as with OpenAI. Priority: CHAT.
 - `POST /v1/completions`: supports `prompt`, `suffix` (fill-in-the-middle for autocomplete), `max_tokens`, `temperature`, `stop`, `stream`. Forward to Ollama `/v1/completions`. Priority: AUTOCOMPLETE if the model role is autocomplete, else CHAT. **Autocomplete supersession:** a newer autocomplete request from the same principal cancels that principal's still-queued older autocomplete request (it returns 499-style `{"error":{"type":"superseded"}}`). This keeps typing responsive.
 - `POST /v1/embeddings`: `input` string or list. Priority: BATCH. Forward to Ollama `/v1/embeddings`.
 - Response headers: `x-request-id`, `x-forge-queue-ms`, `x-forge-model` (Ollama name).
+- Validation happens before queueing: strict types for the fields Forge and Ollama use, the model's role must fit the endpoint, and a prompt estimated above the model's `contextLength` is refused (`context_length_exceeded`) instead of being silently truncated by Ollama. A client that disconnects while queued (or before a non-streamed answer) is cancelled: its ticket is removed and the usage event is 499 `client_disconnected`.
 - Errors are OpenAI-shaped: `{"error":{"message":..., "type":..., "code":...}}`. Status codes:
   - 400 `invalid_request_error` (unknown model, bad body);
   - 401 `invalid_api_key`;
@@ -127,7 +128,7 @@ gateway/Dockerfile           python:3.12-slim based, non-root uid 10001, uvicorn
 
 ### 2.5 Database schema (Postgres 17 + pgvector; all created by the single Alembic migration)
 - `api_keys`: id serial PK, name text unique not null, prefix text, key_hash text unique null (null for web-console), rpm_limit int not null, daily_token_quota bigint not null, created_at timestamptz default now(), revoked_at timestamptz null, last_used_at timestamptz null, builtin bool default false.
-- `usage_events`: id bigserial PK, ts timestamptz default now() (indexed), key_id int FK→api_keys, endpoint text (chat|completions|embeddings|rag), model text (alias), status int, prompt_tokens int, completion_tokens int, queue_ms int, ttft_ms int null, duration_ms int, tokens_per_s real null, error_type text null.
+- `usage_events`: id bigserial PK, ts timestamptz default now() (indexed), key_id int FK→api_keys, endpoint text (chat|completions|embeddings|rag), model text (alias; `unknown` for a model name that doesn't resolve, so client input never becomes a metric label), status int, prompt_tokens int, completion_tokens int, queue_ms int, ttft_ms int null, duration_ms int, tokens_per_s real null, error_type text null.
 - `conversations`: id uuid PK, title text, model text, messages jsonb (list of {role, content}), created_at, updated_at.
 - `repos`: id serial PK, url text unique, branch text, status text (queued|cloning|embedding|ready|failed), error text null, files_indexed int default 0, chunks int default 0, commit_sha text null, created_at, updated_at.
 - `repo_chunks`: id bigserial PK, repo_id int FK→repos ON DELETE CASCADE, path text, start_line int, end_line int, content text, embedding vector(768), plus an HNSW index on `embedding vector_cosine_ops`.
@@ -135,7 +136,7 @@ gateway/Dockerfile           python:3.12-slim based, non-root uid 10001, uvicorn
 ### 2.6 Metering, quotas, metrics
 - Rate limit: per key, `rpm_limit` requests per minute (Redis fixed window `forge:{env}:rpm:{key_id}:{minute}`).
 - Daily token quota: Redis `forge:{env}:tok:{key_id}:{YYYYMMDD}`, checked before a request and incremented after it with prompt + completion tokens.
-- Every request writes one `UsageEvent` (also failures). tokens_per_s = completion_tokens / (duration − ttft).
+- Every request writes one `UsageEvent` (also failures). tokens_per_s = completion_tokens / (duration − ttft); null without a first-token time (non-streamed calls).
 - Prometheus (`/metrics`):
   - `forge_requests_total{endpoint,model,status}`;
   - `forge_tokens_total{model,kind=prompt|completion}`;

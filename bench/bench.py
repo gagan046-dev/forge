@@ -35,6 +35,18 @@ from pathlib import Path
 
 import httpx
 
+
+def connection_hint(base_url: str, exc: Exception) -> str:
+    """Explain the usual cause when a *.localhost name does not resolve on Windows."""
+    host = httpx.URL(base_url).host
+    if isinstance(exc, httpx.ConnectError) and host.endswith(".localhost") and "getaddrinfo" in str(exc):
+        return (
+            f"\n  Windows does not resolve {host} for programs other than browsers. Run "
+            "scripts\\add-hosts.ps1 from an Administrator PowerShell (it maps the Forge names to 127.0.0.1)."
+        )
+    return ""
+
+
 DEFAULT_BASE_URL = "http://forge.localhost:8082/v1"
 RESULTS_DIR = Path(__file__).resolve().parent.parent / "results"
 
@@ -326,7 +338,8 @@ def main() -> int:
             raise SystemExit("no models to benchmark")
         results = [bench_model(forge, m, args.runs, args.embed_batch) for m in models]
     except (httpx.HTTPError, RuntimeError) as exc:
-        print(f"benchmark failed: {exc}", file=sys.stderr)
+        hint = connection_hint(args.base_url, exc) if isinstance(exc, httpx.HTTPError) else ""
+        print(f"benchmark failed: {exc}{hint}", file=sys.stderr)
         return 1
 
     RESULTS_DIR.mkdir(exist_ok=True)

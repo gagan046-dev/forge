@@ -2,25 +2,15 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent }
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { describeError } from "../api/client";
 import { conversations, listOpenAIModels } from "../api/endpoints";
-import { streamChat, type StreamStats } from "../api/stream";
-import type { ChatMessage, ConversationSummary, OpenAIModel } from "../api/types";
+import { streamChat } from "../api/stream";
+import type { ConversationSummary, OpenAIModel } from "../api/types";
 import { Markdown } from "../components/Markdown";
-import { EmptyState, ErrorBanner } from "../components/ui";
+import { EmptyState, ErrorBanner, useDocumentTitle } from "../components/ui";
 import { uuid } from "../lib/browser";
+import { toModelMessages, toStoredMessages, toTurns, type Turn } from "../lib/conversation";
 import { formatDuration, formatInt, formatMs, formatRate, formatRelative } from "../lib/format";
-import { PRESETS, presetForSystemPrompt, type Preset } from "../lib/presets";
+import { PRESETS, presetForSystemPrompt } from "../lib/presets";
 import { useStoredState } from "../lib/useStoredState";
-
-interface Turn {
-  key: string;
-  role: "user" | "assistant";
-  content: string;
-  stats?: StreamStats;
-  /** Set while this assistant turn is being generated. */
-  pending?: boolean;
-  stopped?: boolean;
-  error?: string;
-}
 
 const TITLE_MAX = 60;
 
@@ -29,25 +19,10 @@ function titleFrom(text: string): string {
   return line.length > TITLE_MAX ? `${line.slice(0, TITLE_MAX - 1)}…` : line || "Untitled";
 }
 
-function toTurns(messages: ChatMessage[]): Turn[] {
-  return messages
-    .filter((m): m is ChatMessage & { role: "user" | "assistant" } => m.role === "user" || m.role === "assistant")
-    .map((m) => ({ key: uuid(), role: m.role, content: m.content }));
-}
-
-/** Only finished text goes to the server: no half-failed turns, no UI-only fields. */
-function toStoredMessages(preset: Preset, turns: Turn[]): ChatMessage[] {
-  const out: ChatMessage[] = preset.system ? [{ role: "system", content: preset.system }] : [];
-  for (const t of turns) {
-    if (t.error && !t.content) continue;
-    out.push({ role: t.role, content: t.content });
-  }
-  return out;
-}
-
 export function ChatPage() {
   const { conversationId } = useParams();
   const navigate = useNavigate();
+  useDocumentTitle("Chat");
 
   const [models, setModels] = useState<OpenAIModel[] | null>(null);
   const [modelsError, setModelsError] = useState<unknown>(null);
@@ -57,6 +32,8 @@ export function ChatPage() {
 
   const [history, setHistory] = useState<ConversationSummary[] | null>(null);
   const [historyError, setHistoryError] = useState<unknown>(null);
+  // Narrow screens show the history as a drawer instead of a column.
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [turns, setTurnsState] = useState<Turn[]>([]);
   // Mirror of `turns` so async stream callbacks can read the latest list synchronously.
   const turnsRef = useRef<Turn[]>([]);
@@ -128,7 +105,7 @@ export function ChatPage() {
       .get(conversationId)
       .then((conv) => {
         if (cancelled) return;
-        setTurns(toTurns(conv.messages ?? []));
+        setTurns(toTurns(conv.messages ?? [], uuid));
         const system = conv.messages?.find((m) => m.role === "system")?.content;
         setPresetId(presetForSystemPrompt(system).id);
         if (conv.model) setModel(conv.model);
@@ -141,6 +118,9 @@ export function ChatPage() {
   }, [conversationId, setModel, setPresetId, setTurns]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
+
+  // Picking a conversation (or starting a new one) closes the drawer.
+  useEffect(() => setHistoryOpen(false), [conversationId]);
 
   useEffect(() => {
     const el = threadRef.current;
@@ -173,7 +153,7 @@ export function ChatPage() {
         await conversations.save(id, {
           title: titleFrom(firstUser?.content ?? ""),
           model,
-          messages: toStoredMessages(preset, finalTurns),
+          messages: toStoredMessages(preset.system, finalTurns),
         });
         setSaveError(null);
         refreshHistory();
@@ -225,7 +205,7 @@ export function ChatPage() {
         return turnsRef.current;
       };
 
-      const payload = toStoredMessages(preset, prior);
+      const payload = toModelMessages(preset.system, prior);
       let content = "";
       try {
         const result = await streamChat({
@@ -244,7 +224,8 @@ export function ChatPage() {
       } catch (err) {
         const aborted = err instanceof DOMException && err.name === "AbortError";
         const finalTurns = finish(aborted ? { stopped: true } : { error: describeError(err) });
-        // A stopped answer is still worth keeping; a request that never started is not.
+        // A stopped answer is still worth keeping, and so is a failed one (with its error, so the
+        // reopened question doesn't look unanswered); a request stopped before any text is not.
         if (activeIdRef.current === id && (aborted ? content : true)) await save(id, finalTurns);
       } finally {
         if (abortRef.current === controller) abortRef.current = null;
@@ -272,6 +253,7 @@ export function ChatPage() {
 
   const newChat = () => {
     abortRef.current?.abort();
+    setHistoryOpen(false);
     navigate("/chat");
     inputRef.current?.focus();
   };
@@ -290,8 +272,9 @@ export function ChatPage() {
   const noModels = models !== null && chatModels.length === 0;
 
   return (
-    <div className="chat">
-      <aside className="chat-history" aria-label="Conversations">
+    <div className={`chat${historyOpen ? " history-open" : ""}`}>
+      {historyOpen && <div className="history-backdrop" onClick={() => setHistoryOpen(false)} aria-hidden="true" />}
+      <aside id="chat-history" className="chat-history" aria-label="Conversations">
         <div className="chat-history-head">
           <span className="section-label">History</span>
           <button type="button" className="btn btn-small" onClick={newChat}>
@@ -304,6 +287,15 @@ export function ChatPage() {
 
       <section className="chat-main">
         <div className="toolbar">
+          <button
+            type="button"
+            className="btn btn-small history-toggle"
+            aria-controls="chat-history"
+            aria-expanded={historyOpen}
+            onClick={() => setHistoryOpen((open) => !open)}
+          >
+            History
+          </button>
           <label className="inline-field">
             <span>Model</span>
             <select value={model} onChange={(e) => setModel(e.target.value)} disabled={streaming || chatModels.length === 0}>

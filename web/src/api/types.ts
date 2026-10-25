@@ -1,4 +1,5 @@
 /** Response shapes from SPEC sections 2.3, 2.7 and 2.8. */
+import type { StreamStats } from "./stream";
 
 export type ModelRole = "chat" | "autocomplete" | "embedding";
 
@@ -19,6 +20,8 @@ export interface ApiKey {
   revoked_at: string | null;
   last_used_at: string | null;
   builtin: boolean;
+  /** False for the built-in web-console key: it is metered, but its limits are not enforced. */
+  limited: boolean;
 }
 
 export interface CreatedApiKey extends ApiKey {
@@ -61,7 +64,8 @@ export interface UsageLatency {
 export interface QuotaRow {
   label: string;
   used: number;
-  quota: number;
+  /** null when the key has no enforced quota (the web console). */
+  quota: number | null;
 }
 
 export interface Usage {
@@ -117,6 +121,14 @@ export interface ChatMessage {
   content: string;
 }
 
+/** A saved chat message: the console keeps per-answer details next to the text. */
+export interface StoredMessage extends ChatMessage {
+  stats?: StreamStats;
+  stopped?: boolean;
+  /** Why the answer failed; set on an assistant message whose request errored. */
+  error?: string;
+}
+
 export interface ConversationSummary {
   id: string;
   title: string;
@@ -125,7 +137,7 @@ export interface ConversationSummary {
 
 export interface Conversation extends ConversationSummary {
   model: string;
-  messages: ChatMessage[];
+  messages: StoredMessage[];
   created_at: string;
 }
 

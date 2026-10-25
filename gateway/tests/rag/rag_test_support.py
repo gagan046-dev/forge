@@ -43,13 +43,15 @@ class FakeLLM:
     def __init__(self, answer: list[str] | None = None) -> None:
         self.answer = answer or ["The answer ", "is in ", "the sources [1]."]
         self.embed_calls: list[tuple[int, int]] = []  # (batch size, priority)
+        self.embed_input_types: list[str | None] = []
         self.chat_calls: list[dict] = []
         self.fail_embed_after: int | None = None
 
-    async def embed(self, texts, *, principal, priority=2):
+    async def embed(self, texts, *, principal, priority=2, input_type=None):
         if self.fail_embed_after is not None and len(self.embed_calls) >= self.fail_embed_after:
             raise RuntimeError("embedding backend unavailable")
         self.embed_calls.append((len(texts), int(priority)))
+        self.embed_input_types.append(input_type)
         return [text_embedding(t) for t in texts]
 
     async def stream_chat(

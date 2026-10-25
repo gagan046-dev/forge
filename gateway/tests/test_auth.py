@@ -152,3 +152,69 @@ async def test_login_attempts_are_rate_limited(gateway):
     assert statuses[:5] == [401] * 5
     assert statuses[5:] == [429, 429]
     assert "retry-after" in r.headers
+
+
+async def test_successful_logins_do_not_use_up_the_failure_limit(gateway):
+    # Behind NAT every client can share one address; successes must not lock the admin out.
+    for _ in range(8):
+        ok = await gateway.client.post("/api/auth/login", json={"password": ADMIN_PASSWORD}, headers=CSRF)
+        assert ok.status_code == 200
+    for _ in range(5):
+        wrong = await gateway.client.post("/api/auth/login", json={"password": "wrong-password"}, headers=CSRF)
+        assert wrong.status_code == 401
+    blocked = await gateway.client.post("/api/auth/login", json={"password": ADMIN_PASSWORD}, headers=CSRF)
+    assert blocked.status_code == 429
+
+
+async def test_logout_revokes_the_session_token_server_side(gateway):
+    await gateway.login()
+    token = gateway.client.cookies["forge_session"]
+    assert (await gateway.client.post("/api/auth/logout", headers=CSRF)).status_code == 200
+
+    # A copy of the cookie taken before logout (stolen, or another tab) no longer works.
+    gateway.client.cookies.set("forge_session", token)
+    assert (await gateway.client.get("/api/auth/me")).json() == {"authenticated": False}
+    assert (await gateway.client.get("/api/keys")).status_code == 401
+
+    gateway.client.cookies.clear()
+    await gateway.login()  # a new login gets a new, working session
+    assert (await gateway.client.get("/api/keys")).status_code == 200
+
+
+async def test_key_names_are_trimmed_and_must_not_be_blank(gateway):
+    await gateway.login()
+    blank = await gateway.client.post("/api/keys", json={"name": "   "}, headers=CSRF)
+    assert blank.status_code == 400
+    assert "name" in blank.json()["error"]["message"]
+
+    created = await gateway.client.post("/api/keys", json={"name": "  vigil  "}, headers=CSRF)
+    assert created.json()["name"] == "vigil"
+    dup = await gateway.client.post("/api/keys", json={"name": " vigil"}, headers=CSRF)
+    assert dup.status_code == 409
+    assert dup.json()["error"]["message"] == "A key named 'vigil' already exists"
+
+
+async def test_huge_limits_are_a_400_not_a_database_error(gateway):
+    await gateway.login()
+    huge = await gateway.client.post("/api/keys", json={"name": "huge", "daily_token_quota": 10**19}, headers=CSRF)
+    assert huge.status_code == 400
+    key = await gateway.create_key("ok")
+    patched = await gateway.client.patch(f"/api/keys/{key['id']}", json={"daily_token_quota": 2**63}, headers=CSRF)
+    assert patched.status_code == 400
+
+
+async def test_revoked_and_builtin_keys_cannot_be_patched(gateway):
+    key = await gateway.create_key("old")
+    await gateway.client.delete(f"/api/keys/{key['id']}", headers=CSRF)
+    revoked = await gateway.client.patch(f"/api/keys/{key['id']}", json={"rpm_limit": 9}, headers=CSRF)
+    assert revoked.status_code == 409
+
+    listing = {k["name"]: k for k in (await gateway.client.get("/api/keys")).json()}
+    console = listing["web-console"]
+    assert console["limited"] is False and listing["old"]["limited"] is True
+    builtin = await gateway.client.patch(f"/api/keys/{console['id']}", json={"rpm_limit": 9}, headers=CSRF)
+    assert builtin.status_code == 400
+
+    usage = (await gateway.client.get("/api/usage?range=24h")).json()
+    today = {k["name"]: k for k in usage["today_by_key"]}
+    assert today["web-console"]["daily_token_quota"] is None  # not enforced, so no quota bar

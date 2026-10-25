@@ -15,6 +15,8 @@ models:
     role: chat                   # chat | autocomplete | embedding
     contextLength: 8192
   - alias: forge-autocomplete
+    # Must be a BASE (non-instruct) model: Continue sends a raw FIM prompt to /v1/completions,
+    # and an instruct model's chat template turns it into chat prose and markdown fences.
     name: qwen2.5-coder:1.5b-base
     role: autocomplete
     contextLength: 4096
@@ -22,3 +24,6 @@ models:
     name: nomic-embed-text:v1.5
     role: embedding
     dimensions: 768
+    # nomic-embed-text is trained with task prefixes; Forge's RAG adds them (re-index after changing).
+    documentPrefix: "search_document: "
+    queryPrefix: "search_query: "

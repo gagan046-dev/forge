@@ -5,12 +5,12 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
@@ -25,8 +25,10 @@ from app.auth import (
     hash_api_key,
     key_display_prefix,
     password_matches,
+    record_login_failure,
     require_admin,
     require_csrf,
+    revoke_session,
     session_is_valid,
 )
 from app.backend import BackendManager
@@ -62,10 +64,12 @@ class LoginBody(BaseModel):
 async def login(request: Request, body: LoginBody) -> JSONResponse:
     require_csrf(request)  # also blocks login CSRF (a site logging the browser into our console)
     settings = _settings(request)
+    redis = request.app.state.redis
     client_ip = request.client.host if request.client else "unknown"
-    await check_login_rate(request.app.state.redis, settings, client_ip)
+    await check_login_rate(redis, settings, client_ip)
     if not password_matches(settings, body.password):
         log.info("failed admin login from %s", client_ip)
+        await record_login_failure(redis, settings, client_ip)
         raise ForgeError(401, "invalid_credentials", "Wrong password")
     response = JSONResponse({"authenticated": True})
     response.set_cookie(
@@ -83,6 +87,7 @@ async def login(request: Request, body: LoginBody) -> JSONResponse:
 @router.post("/auth/logout")
 async def logout(request: Request) -> JSONResponse:
     require_csrf(request)
+    await revoke_session(request.app.state.redis, _settings(request), request.cookies.get(SESSION_COOKIE))
     response = JSONResponse({"authenticated": False})
     response.delete_cookie(SESSION_COOKIE, path="/", httponly=True, samesite="lax")
     return response
@@ -90,21 +95,29 @@ async def logout(request: Request) -> JSONResponse:
 
 @router.get("/auth/me")
 async def me(request: Request) -> dict[str, bool]:
-    return {"authenticated": session_is_valid(_settings(request), request.cookies.get(SESSION_COOKIE))}
+    valid = await session_is_valid(request.app.state.redis, _settings(request), request.cookies.get(SESSION_COOKIE))
+    return {"authenticated": valid}
 
 
 # ---- API keys --------------------------------------------------------------------------------
 
 
+# A quadrillion tokens a day is "unlimited" in practice, stays well inside the bigint column, and is
+# below 2**53, so the web console's JavaScript numbers show it exactly.
+MAX_DAILY_TOKENS = 10**15
+MAX_RPM = 100_000
+
+
 class KeyCreate(BaseModel):
-    name: str = Field(min_length=1, max_length=64)
-    rpm_limit: int | None = Field(default=None, ge=1, le=100_000)
-    daily_token_quota: int | None = Field(default=None, ge=1)
+    # Stripped before the length check, so "   " is rejected instead of stored as "".
+    name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
+    rpm_limit: int | None = Field(default=None, ge=1, le=MAX_RPM)
+    daily_token_quota: int | None = Field(default=None, ge=1, le=MAX_DAILY_TOKENS)
 
 
 class KeyUpdate(BaseModel):
-    rpm_limit: int | None = Field(default=None, ge=1, le=100_000)
-    daily_token_quota: int | None = Field(default=None, ge=1)
+    rpm_limit: int | None = Field(default=None, ge=1, le=MAX_RPM)
+    daily_token_quota: int | None = Field(default=None, ge=1, le=MAX_DAILY_TOKENS)
 
     @model_validator(mode="after")
     def _something_to_change(self) -> KeyUpdate:
@@ -124,6 +137,8 @@ def _key_out(key: ApiKey) -> dict[str, Any]:
         "revoked_at": key.revoked_at,
         "last_used_at": key.last_used_at,
         "builtin": key.builtin,
+        # The built-in web-console key (the admin session) is metered but never limited.
+        "limited": not key.builtin,
     }
 
 
@@ -138,7 +153,7 @@ async def create_key(body: KeyCreate, request: Request, session: AsyncSession = 
     settings = _settings(request)
     plain = generate_api_key()
     key = ApiKey(
-        name=body.name.strip(),
+        name=body.name,
         prefix=key_display_prefix(plain),
         key_hash=hash_api_key(plain),
         rpm_limit=body.rpm_limit or settings.default_rpm,
@@ -166,6 +181,10 @@ async def _get_key(session: AsyncSession, key_id: int) -> ApiKey:
 @router.patch("/keys/{key_id}", dependencies=admin)
 async def update_key(key_id: int, body: KeyUpdate, session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     key = await _get_key(session, key_id)
+    if key.builtin:
+        raise ForgeError(400, "invalid_request_error", "The built-in web-console key has no limits to change")
+    if key.revoked_at is not None:
+        raise ForgeError(409, "conflict", "This API key has been revoked; create a new key instead")
     if body.rpm_limit is not None:
         key.rpm_limit = body.rpm_limit
     if body.daily_token_quota is not None:
@@ -268,7 +287,7 @@ async def usage(
 
     active_keys = (
         await session.execute(
-            select(ApiKey.id, ApiKey.name, ApiKey.daily_token_quota)
+            select(ApiKey.id, ApiKey.name, ApiKey.daily_token_quota, ApiKey.builtin)
             .where(ApiKey.revoked_at.is_(None))
             .order_by(ApiKey.id)
         )
@@ -308,7 +327,12 @@ async def usage(
             "tokens_per_s_avg": None if latency.tps is None else round(latency.tps, 2),
         },
         "today_by_key": [
-            {"key_id": k.id, "name": k.name, "tokens_used": used.get(k.id, 0), "daily_token_quota": k.daily_token_quota}
+            {
+                "key_id": k.id,
+                "name": k.name,
+                "tokens_used": used.get(k.id, 0),
+                "daily_token_quota": None if k.builtin else k.daily_token_quota,  # not enforced for it
+            }
             for k in active_keys
         ],
     }

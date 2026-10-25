@@ -22,6 +22,10 @@ class ModelSpec(BaseModel):
     role: ModelRole
     context_length: int | None = Field(default=None, alias="contextLength")
     dimensions: int | None = None
+    # Task prefixes some embedding models expect (nomic-embed-text: "search_document: " and
+    # "search_query: "); the RAG indexer and the ask path add them.
+    document_prefix: str = Field(default="", alias="documentPrefix")
+    query_prefix: str = Field(default="", alias="queryPrefix")
 
 
 # Mirrors gitops/models.yaml so a local `uvicorn` run works without extra setup.
@@ -34,7 +38,14 @@ DEFAULT_MODELS_JSON = json.dumps(
             "role": "autocomplete",
             "contextLength": 4096,
         },
-        {"alias": "forge-embed", "name": "nomic-embed-text:v1.5", "role": "embedding", "dimensions": 768},
+        {
+            "alias": "forge-embed",
+            "name": "nomic-embed-text:v1.5",
+            "role": "embedding",
+            "dimensions": 768,
+            "documentPrefix": "search_document: ",
+            "queryPrefix": "search_query: ",
+        },
     ]
 )
 

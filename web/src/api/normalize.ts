@@ -83,7 +83,7 @@ export function normalizeUsage(raw: unknown): Usage {
   const today_by_key: QuotaRow[] = list(o.today_by_key).map((r) => ({
     label: str(r, "name", "key_name", "key", "key_id") ?? "unknown",
     used: num(r, "tokens", "used", "tokens_used", "used_tokens") ?? 0,
-    quota: num(r, "quota", "daily_token_quota", "limit") ?? 0,
+    quota: num(r, "quota", "daily_token_quota", "limit"),
   }));
 
   return {

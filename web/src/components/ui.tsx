@@ -3,7 +3,18 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { describeError } from "../api/client";
 import { copyText } from "../lib/browser";
 
+/** Names the browser tab and history entry after the page ("API keys · Forge"). */
+export function useDocumentTitle(title: string) {
+  useEffect(() => {
+    document.title = `${title} · Forge`;
+    return () => {
+      document.title = "Forge";
+    };
+  }, [title]);
+}
+
 export function PageHeader({ title, description, actions }: { title: string; description?: ReactNode; actions?: ReactNode }) {
+  useDocumentTitle(title);
   return (
     <header className="page-header">
       <div>

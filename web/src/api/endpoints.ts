@@ -2,13 +2,13 @@ import { api } from "./client";
 import { normalizeModelsStatus, normalizeStatus, normalizeUsage } from "./normalize";
 import type {
   ApiKey,
-  ChatMessage,
   Conversation,
   ConversationSummary,
   CreatedApiKey,
   ModelsStatus,
   OpenAIModel,
   Repo,
+  StoredMessage,
   SystemStatus,
   Usage,
   UsageRange,
@@ -52,7 +52,7 @@ export async function getStatus(signal?: AbortSignal): Promise<SystemStatus> {
 export const conversations = {
   list: () => api.get<ConversationSummary[]>("/api/conversations"),
   get: (id: string) => api.get<Conversation>(`/api/conversations/${encodeURIComponent(id)}`),
-  save: (id: string, body: { title: string; model: string; messages: ChatMessage[] }) =>
+  save: (id: string, body: { title: string; model: string; messages: StoredMessage[] }) =>
     api.put<Conversation>(`/api/conversations/${encodeURIComponent(id)}`, body),
   remove: (id: string) => api.del(`/api/conversations/${encodeURIComponent(id)}`),
 };

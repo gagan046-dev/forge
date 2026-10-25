@@ -152,7 +152,7 @@ async def create_repo(
         raise HTTPException(status.HTTP_409_CONFLICT, "This repository is already added.") from exc
     await session.refresh(repo)
 
-    indexer.submit(repo.id, principal)
+    await indexer.submit(repo.id, principal)
     return repo
 
 
@@ -192,12 +192,17 @@ async def reindex_repo(
     indexer: Indexer = Depends(get_indexer),
 ) -> Repo:
     repo = await _get_repo(session, repo_id)
-    if indexer.is_pending(repo_id):
+    # The claim lives in Redis, so a job queued or running on any gateway replica counts.
+    if not await indexer.claim(repo_id):
         raise HTTPException(status.HTTP_409_CONFLICT, "This repository is already being indexed.")
-    repo.status, repo.error = "queued", None
-    await session.commit()
-    await session.refresh(repo)
-    indexer.submit(repo_id, principal)
+    try:
+        repo.status, repo.error = "queued", None
+        await session.commit()
+        await session.refresh(repo)
+    except BaseException:
+        await indexer.release(repo_id)
+        raise
+    indexer.enqueue(repo_id, principal)
     return repo
 
 
@@ -249,7 +254,7 @@ async def answer_events(
     """sources -> token* -> done, or error at any point (the HTTP status is already 200)."""
     started = time.monotonic()
     try:
-        [query_vector] = await llm.embed([question], principal=principal, priority=Priority.CHAT)
+        [query_vector] = await llm.embed([question], principal=principal, priority=Priority.CHAT, input_type="query")
         async with session_factory() as session:
             hits = await search_chunks(session, repo_id, query_vector, top_k)
         if not hits:
@@ -295,7 +300,7 @@ async def answer_events(
             "duration_ms": round((finished - started) * 1000),
             "ttft_ms": round((first_token_at - started) * 1000) if first_token_at else None,
         }
-        # If the LLM client exposes token usage on the stream object, pass it through.
+        # Token counts from the model server (LLM.stream_chat's stream exposes them once read).
         reported = getattr(stream, "usage", None)
         if isinstance(reported, dict):
             usage.update(reported)

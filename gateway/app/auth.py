@@ -116,27 +116,65 @@ def password_matches(settings: Settings, candidate: str) -> bool:
 
 
 def create_session_token(settings: Settings) -> str:
-    return _serializer(settings).dumps({"sub": "admin"})
+    # The random session id lets logout revoke this one token server-side (see revoke_session).
+    return _serializer(settings).dumps({"sub": "admin", "sid": secrets.token_urlsafe(16)})
 
 
-def session_is_valid(settings: Settings, token: str | None) -> bool:
+def _session_id(settings: Settings, token: str | None) -> str | None:
+    """The session id of a correctly signed, unexpired admin token, else None."""
     if not token:
-        return False
+        return None
     try:
         data = _serializer(settings).loads(token, max_age=SESSION_MAX_AGE_S)
     except BadSignature:  # also covers SignatureExpired
-        return False
-    return isinstance(data, dict) and data.get("sub") == "admin"
+        return None
+    if not isinstance(data, dict) or data.get("sub") != "admin" or not isinstance(data.get("sid"), str):
+        return None
+    return data["sid"]
+
+
+def _revoked_key(settings: Settings, sid: str) -> str:
+    return f"forge:{settings.env}:session:revoked:{sid}"
+
+
+async def session_is_valid(redis: Redis, settings: Settings, token: str | None) -> bool:
+    sid = _session_id(settings, token)
+    return sid is not None and not await redis.exists(_revoked_key(settings, sid))
+
+
+async def revoke_session(redis: Redis, settings: Settings, token: str | None) -> None:
+    """Make a session token unusable before it expires (logout), on every gateway replica."""
+    sid = _session_id(settings, token)
+    if sid is not None:
+        # Kept as long as the token could still be valid; after that the signature check fails anyway.
+        await redis.set(_revoked_key(settings, sid), "1", ex=SESSION_MAX_AGE_S)
+
+
+def _login_key(settings: Settings, client_ip: str) -> str:
+    return f"forge:{settings.env}:login:{client_ip}:{int(time.time() // 60)}"
+
+
+def _login_retry_after() -> int:
+    return 60 - int(time.time() % 60)
 
 
 async def check_login_rate(redis: Redis, settings: Settings, client_ip: str) -> None:
-    key = f"forge:{settings.env}:login:{client_ip}:{int(time.time() // 60)}"
+    """Refuse a login attempt once this client had too many failures in the current minute.
+
+    Only failures count (see record_login_failure): behind a NAT every client can share one
+    address, so counting successful logins too would lock the admin out after a few page loads.
+    """
+    failures = await redis.get(_login_key(settings, client_ip))
+    if int(failures or 0) >= LOGIN_ATTEMPTS_PER_MINUTE:
+        raise ForgeError(429, "rate_limit_exceeded", "Too many failed login attempts", retry_after=_login_retry_after())
+
+
+async def record_login_failure(redis: Redis, settings: Settings, client_ip: str) -> None:
+    key = _login_key(settings, client_ip)
     async with redis.pipeline(transaction=True) as pipe:
         pipe.incr(key)
         pipe.expire(key, 120)
-        attempts, _ = await pipe.execute()
-    if int(attempts) > LOGIN_ATTEMPTS_PER_MINUTE:
-        raise ForgeError(429, "rate_limit_exceeded", "Too many login attempts", retry_after=60 - int(time.time() % 60))
+        await pipe.execute()
 
 
 def require_csrf(request: Request) -> None:
@@ -151,7 +189,7 @@ def require_csrf(request: Request) -> None:
 
 async def _admin_principal(request: Request, session: AsyncSession) -> Principal | None:
     settings: Settings = request.app.state.settings
-    if not session_is_valid(settings, request.cookies.get(SESSION_COOKIE)):
+    if not await session_is_valid(request.app.state.redis, settings, request.cookies.get(SESSION_COOKIE)):
         return None
     key = await session.scalar(select(ApiKey).where(ApiKey.name == WEB_CONSOLE_KEY_NAME))
     if key is None:  # only possible if someone deleted the row by hand

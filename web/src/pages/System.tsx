@@ -141,7 +141,12 @@ function GpuPanel({ gpu }: { gpu: GpuStats }) {
         <div className="gauge">
           <dt>Power</dt>
           <dd>
-            <Meter value={power ?? 0} max={limit ?? 0} warnAt={0.95} />
+            {limit !== null && limit > 0 ? (
+              <Meter value={power ?? 0} max={limit} warnAt={0.95} />
+            ) : (
+              // Laptop GPUs often report no power limit; an always-empty bar would read as 0 W.
+              <span className="muted small">no limit reported</span>
+            )}
             <span className="mono">
               {power !== null ? `${power.toFixed(0)} W` : "–"}
               {limit !== null && ` / ${limit.toFixed(0)} W`}

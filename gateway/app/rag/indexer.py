@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from sqlalchemy import delete, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import Principal
@@ -45,6 +45,10 @@ MAX_ERROR_CHARS = 1000
 
 LOCK_NAME = "forge:rag:lock"
 LOCK_TTL_S = 60
+# One claim per repo while it is queued or being indexed on any gateway replica, so a second
+# (re)index request is refused cluster-wide. The TTL frees the claim if its replica crashes.
+JOB_CLAIM_KEY = "forge:rag:job:{repo_id}"
+JOB_CLAIM_TTL_S = 60
 
 # fmt: off
 SKIP_DIRS = frozenset(
@@ -383,6 +387,23 @@ async def _update_repo(session_factory: SessionFactory, repo_id: int, **values: 
         await session.commit()
 
 
+async def _repo_exists(session_factory: SessionFactory, repo_id: int) -> bool:
+    async with session_factory() as session:
+        return await session.scalar(select(Repo.id).where(Repo.id == repo_id)) is not None
+
+
+async def _repo_exists_quietly(session_factory: SessionFactory, repo_id: int) -> bool:
+    """Like _repo_exists, but assumes the repo exists if the database can't be asked."""
+    try:
+        return await _repo_exists(session_factory, repo_id)
+    except Exception:
+        return True
+
+
+class RepoDeleted(Exception):
+    """The repo row disappeared mid-job (deleted, possibly through another gateway replica)."""
+
+
 async def index_repo(
     repo_id: int,
     *,
@@ -429,7 +450,13 @@ async def index_repo(
 
         stored = 0
         for batch in _batched(chunks, EMBED_BATCH):
-            vectors = await llm.embed([c.content for c in batch], principal=principal, priority=Priority.BATCH)
+            # A delete on another replica can't cancel this task; checking before each batch
+            # stops the job within one batch instead of embedding the whole repo for nothing.
+            if not await _repo_exists(session_factory, repo_id):
+                raise RepoDeleted
+            vectors = await llm.embed(
+                [c.content for c in batch], principal=principal, priority=Priority.BATCH, input_type="document"
+            )
             if len(vectors) != len(batch) or any(len(v) != EMBEDDING_DIMENSIONS for v in vectors):
                 raise IndexingError(
                     f"Embedding model returned an unexpected shape; expected {len(batch)} vectors "
@@ -459,6 +486,11 @@ async def index_repo(
             await _update_repo(session_factory, repo_id, status="failed", error="Indexing was interrupted.")
         raise
     except Exception as exc:
+        # Deleted mid-job: a chunk insert then fails on the foreign key. That is not a failure
+        # worth reporting, and there is no row left to report it on.
+        if isinstance(exc, RepoDeleted) or not await _repo_exists_quietly(session_factory, repo_id):
+            log.info("repo %s was deleted while indexing; stopped", repo_id)
+            return
         log.warning("indexing repo %s failed: %s", repo_id, describe_error(exc))
         with contextlib.suppress(Exception):
             await _update_repo(session_factory, repo_id, status="failed", error=describe_error(exc))
@@ -514,21 +546,63 @@ class Indexer:
     clone_timeout: float = CLONE_TIMEOUT_S
     _queue: asyncio.Queue[_Job] = field(default_factory=asyncio.Queue, init=False)
     _pending: set[int] = field(default_factory=set, init=False)
+    _claims: dict[int, Any] = field(default_factory=dict, init=False)  # repo id -> redis Lock
     _current: tuple[int, asyncio.Task[None]] | None = field(default=None, init=False)
     _worker: asyncio.Task[None] | None = field(default=None, init=False)
+    _renewer: asyncio.Task[None] | None = field(default=None, init=False)
 
     def is_pending(self, repo_id: int) -> bool:
         return repo_id in self._pending
 
-    def submit(self, repo_id: int, principal: Principal) -> bool:
-        """Queue a job; returns False if this repo is already queued or running here."""
-        if repo_id in self._pending:
+    async def claim(self, repo_id: int) -> bool:
+        """Reserve the repo for one index job across all gateway replicas.
+
+        False if a job for it is already queued or running anywhere. A successful claim must be
+        followed by `enqueue` (or `release`).
+        """
+        if repo_id in self._pending or repo_id in self._claims:
             return False
+        lock = self.redis.lock(
+            JOB_CLAIM_KEY.format(repo_id=repo_id),
+            timeout=JOB_CLAIM_TTL_S,
+            thread_local=False,
+            raise_on_release_error=False,
+        )
+        if not await lock.acquire(blocking=False):
+            return False
+        self._claims[repo_id] = lock
+        if self._renewer is None or self._renewer.done():
+            self._renewer = asyncio.create_task(self._renew_claims(), name="forge-rag-claims")
+        return True
+
+    async def release(self, repo_id: int) -> None:
+        lock = self._claims.pop(repo_id, None)
+        if lock is not None:
+            with contextlib.suppress(Exception):
+                await lock.release()
+
+    def enqueue(self, repo_id: int, principal: Principal) -> None:
+        """Queue a job for a repo claimed with `claim`."""
         self._pending.add(repo_id)
         self._queue.put_nowait(_Job(repo_id, principal))
         if self._worker is None or self._worker.done():
             self._worker = asyncio.create_task(self._run(), name="forge-rag-indexer")
+
+    async def submit(self, repo_id: int, principal: Principal) -> bool:
+        """Claim and queue in one step; False if the repo is already being indexed somewhere."""
+        if not await self.claim(repo_id):
+            return False
+        self.enqueue(repo_id, principal)
         return True
+
+    async def _renew_claims(self) -> None:
+        while self._claims:
+            await asyncio.sleep(JOB_CLAIM_TTL_S / 3)
+            for repo_id, lock in list(self._claims.items()):
+                try:
+                    await lock.extend(JOB_CLAIM_TTL_S, replace_ttl=True)
+                except Exception as exc:  # at worst another replica may start a duplicate job
+                    log.warning("could not renew the index claim for repo %s: %s", repo_id, exc)
 
     def cancel(self, repo_id: int) -> None:
         """Forget a queued job, or stop the running one (used when a repo is deleted)."""
@@ -547,6 +621,13 @@ class Indexer:
                 await self._worker
         if self._current:
             self._current[1].cancel()
+        if self._renewer:
+            self._renewer.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._renewer
+        # Interrupted jobs are marked failed; free their claims so they can be re-indexed at once.
+        for repo_id in list(self._claims):
+            await self.release(repo_id)
 
     async def _run(self) -> None:
         while True:
@@ -564,6 +645,7 @@ class Indexer:
             finally:
                 self._pending.discard(job.repo_id)
                 self._current = None
+                await self.release(job.repo_id)
                 self._queue.task_done()
 
     async def _run_job(self, job: _Job) -> None:

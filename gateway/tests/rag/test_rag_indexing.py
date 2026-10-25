@@ -195,7 +195,7 @@ async def test_embedding_failure_marks_repo_failed(client, rag_app, origin, fake
 @pytest.mark.asyncio
 async def test_wrong_embedding_size_marks_repo_failed(session_factory, origin, test_policy):
     class ShortVectors:
-        async def embed(self, texts, *, principal, priority=2):
+        async def embed(self, texts, *, principal, priority=2, input_type=None):
             return [[0.1] * 10 for _ in texts]
 
     async with session_factory() as session:
@@ -234,3 +234,90 @@ async def test_delete_while_waiting_cancels_the_job(client, rag_app, origin, fak
         assert (await client.delete(f"/api/repos/{repo_id}")).status_code == 204
     await wait_idle(rag_app)
     assert fake_llm.embed_calls == []
+
+
+@pytest.mark.asyncio
+async def test_reindex_is_refused_while_another_replica_holds_the_job(client, rag_app, origin, fake_redis):
+    from app.rag.indexer import JOB_CLAIM_KEY
+
+    repo_id = (await client.post("/api/repos", json={"url": origin.as_uri()})).json()["id"]
+    await wait_idle(rag_app)
+    assert (await client.get(f"/api/repos/{repo_id}")).json()["status"] == "ready"
+
+    # Another gateway replica (same Redis, its own in-memory queue) is indexing this repo.
+    other = fake_redis.lock(JOB_CLAIM_KEY.format(repo_id=repo_id), timeout=60, thread_local=False)
+    assert await other.acquire(blocking=False)
+    refused = await client.post(f"/api/repos/{repo_id}/reindex")
+    assert refused.status_code == 409
+    # The refused request must not touch the row the other replica is working on.
+    assert (await client.get(f"/api/repos/{repo_id}")).json()["status"] == "ready"
+
+    await other.release()
+    assert (await client.post(f"/api/repos/{repo_id}/reindex")).status_code == 202
+    await wait_idle(rag_app)
+    # The claim is released when the job ends, so the next reindex is accepted again.
+    assert (await client.post(f"/api/repos/{repo_id}/reindex")).status_code == 202
+    await wait_idle(rag_app)
+
+
+@pytest.mark.asyncio
+async def test_two_indexers_on_one_redis_share_the_claim(session_factory, fake_llm, fake_redis, test_policy):
+    from app.rag.indexer import Indexer
+
+    first = Indexer(session_factory=session_factory, llm=fake_llm, redis=fake_redis, policy=test_policy)
+    second = Indexer(session_factory=session_factory, llm=fake_llm, redis=fake_redis, policy=test_policy)
+    try:
+        assert await first.claim(42)
+        assert not await second.claim(42)
+        await first.release(42)
+        assert await second.claim(42)
+    finally:
+        await first.aclose()
+        await second.aclose()
+
+
+@pytest.mark.asyncio
+async def test_delete_from_another_replica_stops_the_job(session_factory, tmp_path, test_policy, caplog):
+    from sqlalchemy import delete
+
+    big = tmp_path / "big"
+    big.mkdir()
+    git(big, "init", "-q", "-b", "main")
+    for i in range(80):  # 80 chunks: three embed batches of 32
+        (big / f"mod{i}.py").write_text(f"def f{i}():\n    return {i}\n")
+    git(big, "add", "-A")
+    git(big, "commit", "-q", "-m", "many files")
+
+    class DeletingLLM:
+        """Embeds the first batch, during which 'another replica' deletes the repo."""
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def embed(self, texts, *, principal, priority=2, input_type=None):
+            self.calls += 1
+            async with session_factory() as session:
+                await session.execute(delete(Repo).where(Repo.id == repo.id))
+                await session.commit()
+            return [[0.0] * 767 + [1.0] for _ in texts]
+
+    async with session_factory() as session:
+        repo = Repo(url=big.as_uri(), status="queued")
+        session.add(repo)
+        await session.commit()
+    llm = DeletingLLM()
+    with caplog.at_level("INFO", logger="app.rag.indexer"):
+        await index_repo(repo.id, session_factory=session_factory, llm=llm, principal=ADMIN, policy=test_policy)
+    assert llm.calls == 1  # stopped instead of embedding every remaining batch
+    assert "deleted while indexing" in caplog.text
+    assert "failed" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_chunks_and_questions_are_embedded_with_their_task_types(client, rag_app, origin, fake_llm):
+    repo_id = (await client.post("/api/repos", json={"url": origin.as_uri()})).json()["id"]
+    await wait_idle(rag_app)
+    assert set(fake_llm.embed_input_types) == {"document"}
+    fake_llm.embed_input_types.clear()
+    await client.post(f"/api/repos/{repo_id}/ask", json={"question": "How does greet work?"})
+    assert fake_llm.embed_input_types == ["query"]

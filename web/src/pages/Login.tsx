@@ -3,6 +3,7 @@ import { Navigate, useNavigate, useSearchParams } from "react-router-dom";
 import { ApiError, describeError } from "../api/client";
 import { auth } from "../api/endpoints";
 import { useAuth } from "../auth";
+import { useDocumentTitle } from "../components/ui";
 
 function safeNext(next: string | null): string {
   // Only same-app paths, so ?next= can't bounce the user to another site.
@@ -17,6 +18,7 @@ export function LoginPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const next = safeNext(params.get("next"));
+  useDocumentTitle("Sign in");
 
   if (state === "signed-in") return <Navigate to={next} replace />;
 

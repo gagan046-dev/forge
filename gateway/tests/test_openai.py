@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
 from conftest import usage_events
 
 from app.auth import Principal
@@ -23,7 +24,11 @@ def console_principal(gateway) -> Principal:
 
 async def test_streaming_chat_passes_chunks_through_and_meters_usage(gateway, bearer, database_url):
     key = await gateway.create_key()
-    response = await gateway.client.post("/v1/chat/completions", json=CHAT | {"stream": True}, headers=bearer(key))
+    response = await gateway.client.post(
+        "/v1/chat/completions",
+        json=CHAT | {"stream": True, "stream_options": {"include_usage": True}},
+        headers=bearer(key),
+    )
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
     assert response.headers["x-forge-model"] == "qwen2.5-coder:7b"
@@ -72,7 +77,8 @@ async def test_non_streaming_chat_rewrites_model_and_meters(gateway, bearer, dat
     [event] = await usage_events(database_url)
     assert (event["prompt_tokens"], event["completion_tokens"], event["status"]) == (11, 3, 200)
     assert event["ttft_ms"] is None
-    assert event["tokens_per_s"] is not None
+    # No first-token time, so no generation speed (the duration includes prompt processing).
+    assert event["tokens_per_s"] is None
 
 
 async def test_raw_ollama_names_are_accepted(gateway, bearer):
@@ -167,7 +173,8 @@ async def test_unknown_model_is_400_and_recorded(gateway, bearer, database_url):
     assert error["type"] == "invalid_request_error"
     assert error["code"] == "model_not_found"
     [event] = await usage_events(database_url)
-    assert (event["status"], event["model"], event["error_type"]) == (400, "gpt-9", "invalid_request_error")
+    # Client-chosen strings never become metric labels or usage rows: they all share "unknown".
+    assert (event["status"], event["model"], event["error_type"]) == (400, "unknown", "invalid_request_error")
 
 
 async def test_bad_bodies_are_openai_shaped_400s(gateway, bearer):
@@ -236,3 +243,195 @@ async def test_abandoned_stream_releases_its_slot_and_is_recorded(gateway, datab
     assert (event["status"], event["error_type"]) == (499, "client_disconnected")
     assert event["ttft_ms"] is not None
     assert event["completion_tokens"] > 0  # estimated from what was generated before the disconnect
+
+
+async def test_usage_chunk_only_sent_when_requested(gateway, bearer, database_url):
+    key = await gateway.create_key()
+    for extra in ({}, {"stream_options": {"include_usage": False}}):
+        response = await gateway.client.post(
+            "/v1/chat/completions", json=CHAT | {"stream": True} | extra, headers=bearer(key)
+        )
+        chunks = [json.loads(d) for d in sse_data(response.text)[:-1]]
+        # Like OpenAI: every chunk has a choice, so clients reading choices[0] don't crash.
+        assert all(c["choices"] for c in chunks)
+        assert not any("usage" in c for c in chunks)
+    # Forge still meters the exact counts, because it always asks Ollama for them.
+    assert [(e["prompt_tokens"], e["completion_tokens"]) for e in await usage_events(database_url)] == [(11, 3)] * 2
+
+
+async def test_chat_body_fields_are_validated_strictly(gateway, bearer):
+    key = await gateway.create_key()
+    cases = {
+        "max_tokens": CHAT | {"max_tokens": -5},
+        "messages.0.role": CHAT | {"messages": [{"role": "wizard", "content": "hi"}]},
+        "stream": CHAT | {"stream": "yes"},
+        "temperature": CHAT | {"temperature": "hot"},
+        "messages.0.content": CHAT | {"messages": [{"role": "user", "content": 42}]},
+    }
+    for field, body in cases.items():
+        response = await gateway.client.post("/v1/chat/completions", json=body, headers=bearer(key))
+        assert response.status_code == 400, field
+        error = response.json()["error"]
+        assert error["type"] == "invalid_request_error"
+        assert error["message"].startswith(f"{field}: "), error["message"]
+    assert gateway.ollama.bodies("/v1/chat/completions") == []  # nothing reached the model server
+
+
+async def test_rejected_requests_never_create_labels_from_client_input(gateway, bearer, database_url):
+    from prometheus_client import generate_latest
+
+    key = await gateway.create_key()
+    await gateway.client.post("/v1/embeddings", json={"model": "made-up-model-123", "input": "x"}, headers=bearer(key))
+    # A bad body for a known model is attributed to that model's alias.
+    await gateway.client.post("/v1/chat/completions", json={"model": "qwen2.5-coder:7b"}, headers=bearer(key))
+    assert "made-up-model-123" not in generate_latest().decode()
+    assert [e["model"] for e in await usage_events(database_url)] == ["unknown", "forge-chat"]
+
+
+async def test_prompt_over_the_context_window_is_rejected(gateway, bearer, database_url):
+    key = await gateway.create_key()
+    long_prompt = "SECRET WORD: pineapple-42.\n" + "the quick brown fox jumps over the lazy dog\n" * 900
+    messages = [{"role": "user", "content": long_prompt}]
+    body = CHAT | {"messages": messages}
+    response = await gateway.client.post("/v1/chat/completions", json=body, headers=bearer(key))
+    assert response.status_code == 400
+    error = response.json()["error"]
+    assert error["code"] == "context_length_exceeded"
+    assert "8192" in error["message"]
+    assert gateway.ollama.bodies("/v1/chat/completions") == []
+    [event] = await usage_events(database_url)
+    assert (event["model"], event["status"]) == ("forge-chat", 400)
+
+
+async def test_empty_embedding_input_is_rejected_before_queueing(gateway, bearer):
+    key = await gateway.create_key()
+    cases = {
+        "[]": ([], "input: must not be an empty list"),
+        "''": ("", "input: must not be an empty string"),
+        "['a', '']": (["a", ""], "input: must not contain empty strings"),
+    }
+    for name, (value, message) in cases.items():
+        response = await gateway.client.post(
+            "/v1/embeddings", json={"model": "forge-embed", "input": value}, headers=bearer(key)
+        )
+        assert response.status_code == 400, name
+        assert response.json()["error"]["message"] == message
+    assert gateway.ollama.bodies("/v1/embeddings") == []
+
+
+async def test_model_role_must_fit_the_endpoint(gateway, bearer):
+    key = await gateway.create_key()
+    chat_embed = await gateway.client.post(
+        "/v1/embeddings", json={"model": "forge-chat", "input": "hi"}, headers=bearer(key)
+    )
+    assert chat_embed.status_code == 400
+    assert chat_embed.json()["error"]["code"] == "model_not_supported"
+    embed_complete = await gateway.client.post(
+        "/v1/completions", json={"model": "forge-embed", "prompt": "def f():"}, headers=bearer(key)
+    )
+    assert embed_complete.status_code == 400
+    assert [p for p, _ in gateway.ollama.requests if p.startswith("/v1/")] == []
+
+
+async def test_completion_prompt_may_be_a_one_element_list(gateway, bearer):
+    key = await gateway.create_key()
+    request = {"model": "forge-autocomplete", "prompt": ["def f():"], "max_tokens": 5}
+    ok = await gateway.client.post("/v1/completions", json=request, headers=bearer(key))
+    assert ok.status_code == 200
+    assert gateway.ollama.bodies("/v1/completions")[-1]["prompt"] == "def f():"
+    two = await gateway.client.post("/v1/completions", json=request | {"prompt": ["a", "b"]}, headers=bearer(key))
+    assert two.status_code == 400
+    assert "one prompt per request" in two.json()["error"]["message"]
+
+
+async def test_stream_chat_reports_token_usage_once_read(gateway):
+    llm = gateway.state.llm
+    stream = llm.stream_chat(CHAT["messages"], model_alias="forge-chat", principal=console_principal(gateway))
+    assert [d async for d in stream] == ["Hel", "lo", " world"]
+    assert stream.usage == {"prompt_tokens": 11, "completion_tokens": 3, "total_tokens": 14}
+
+
+async def test_embed_adds_the_models_task_prefix(gateway):
+    llm = gateway.state.llm
+    principal = console_principal(gateway)
+    await llm.embed(["def f(): pass"], principal=principal, input_type="document")
+    await llm.embed(["what does f do?"], principal=principal, input_type="query")
+    await llm.embed(["plain"], principal=principal)
+    inputs = [b["input"] for b in gateway.ollama.bodies("/v1/embeddings")]
+    assert inputs == [["search_document: def f(): pass"], ["search_query: what does f do?"], ["plain"]]
+
+
+async def _post_until_disconnect(app, path: str, body: dict, token: str, disconnect: asyncio.Event) -> list[dict]:
+    """Drive the ASGI app like uvicorn does, with a client that hangs up when `disconnect` is set."""
+    pending = [{"type": "http.request", "body": json.dumps(body).encode(), "more_body": False}]
+    sent: list[dict] = []
+
+    async def receive() -> dict:
+        if pending:
+            return pending.pop()
+        await disconnect.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", b"forge.test"),
+            (b"content-type", b"application/json"),
+            (b"authorization", f"Bearer {token}".encode()),
+        ],
+        "client": ("127.0.0.1", 50000),
+        "server": ("forge.test", 80),
+    }
+    await app(scope, receive, send)
+    return sent
+
+
+@pytest.mark.parametrize("stream", [False, True])
+async def test_client_disconnect_while_queued_removes_the_ticket(gateway, database_url, stream):
+    key = await gateway.create_key()
+    scheduler = gateway.state.scheduler
+    disconnect = asyncio.Event()
+    request = {"model": "forge-autocomplete", "prompt": "def f():\n", "max_tokens": 8, "stream": stream}
+
+    async with scheduler.slot(Priority.CHAT, 999, "holder"), scheduler.slot(Priority.CHAT, 998, "holder"):
+        call = asyncio.create_task(
+            _post_until_disconnect(gateway.app, "/v1/completions", request, key["key"], disconnect)
+        )
+        while await scheduler.queue_depth() < 1:
+            await asyncio.sleep(0.01)
+        disconnect.set()  # the editor aborted the stale completion
+        await asyncio.wait_for(call, 5)
+        assert await scheduler.queue_depth() == 0  # gone at once, not when a slot frees up
+    assert gateway.ollama.bodies("/v1/completions") == []  # never ran on the GPU
+    [event] = await usage_events(database_url)
+    assert (event["status"], event["error_type"]) == (499, "client_disconnected")
+    assert event["prompt_tokens"] + event["completion_tokens"] == 0
+
+
+async def test_client_disconnect_during_a_non_streamed_answer_frees_the_slot(gateway, database_url):
+    key = await gateway.create_key()
+    gateway.ollama.gate = asyncio.Event()  # Ollama "generates" until released
+    disconnect = asyncio.Event()
+    call = asyncio.create_task(
+        _post_until_disconnect(gateway.app, "/v1/chat/completions", CHAT, key["key"], disconnect)
+    )
+    while not gateway.ollama.bodies("/v1/chat/completions"):
+        await asyncio.sleep(0.01)
+    assert await gateway.state.scheduler.inflight() == 1
+    disconnect.set()
+    await asyncio.wait_for(call, 5)
+    assert await gateway.state.scheduler.inflight() == 0
+    [event] = await usage_events(database_url)
+    assert (event["status"], event["error_type"]) == (499, "client_disconnected")
+    gateway.ollama.gate.set()

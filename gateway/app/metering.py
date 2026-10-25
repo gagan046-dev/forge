@@ -72,15 +72,11 @@ class CallRecord:
     model: str  # alias
     started: float = field(default_factory=time.perf_counter)
     queue_ms: int = 0
-    upstream_started: float | None = None
     first_token_at: float | None = None
     prompt_tokens: int = 0
     completion_tokens: int = 0
     status: int = 200
     error_type: str | None = None
-
-    def mark_upstream_start(self) -> None:
-        self.upstream_started = time.perf_counter()
 
     def mark_first_token(self) -> None:
         if self.first_token_at is None:
@@ -100,12 +96,13 @@ class CallRecord:
         """Return (duration_ms, tokens_per_s)."""
         end = time.perf_counter()
         duration_ms = int((end - self.started) * 1000)
-        # Generation speed excludes queueing and prompt processing when we know the first token
-        # time; for non-streamed calls the best we have is the upstream call duration.
-        gen_start = self.first_token_at or self.upstream_started
+        # SPEC 2.6: completion / (duration - ttft), i.e. generation speed after the first token.
+        # A non-streamed call has no first-token time; its upstream duration includes prompt
+        # processing (seconds for a long prompt), which would understate the speed ~10x, so it
+        # gets no value rather than a misleading one.
         tokens_per_s = None
-        if self.completion_tokens > 0 and gen_start is not None and end - gen_start > 0:
-            tokens_per_s = round(self.completion_tokens / (end - gen_start), 2)
+        if self.completion_tokens > 0 and self.first_token_at is not None and end - self.first_token_at > 0:
+            tokens_per_s = round(self.completion_tokens / (end - self.first_token_at), 2)
         return duration_ms, tokens_per_s
 
 

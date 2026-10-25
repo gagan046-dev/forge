@@ -28,10 +28,10 @@
           "uid": "prometheus"
         },
         "query": {
-          "query": "label_values(forge_requests_total, namespace)",
+          "query": "label_values(forge_backend_up, namespace)",
           "refId": "env"
         },
-        "definition": "label_values(forge_requests_total, namespace)",
+        "definition": "label_values(forge_backend_up, namespace)",
         "includeAll": true,
         "multi": true,
         "allValue": "forge-.*",
@@ -513,7 +513,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "forge_gpu_utilization_percent",
+          "expr": "max by (gpu, name) (forge_gpu_utilization_percent)",
           "legendFormat": "{{name}}",
           "refId": "A",
           "range": true
@@ -575,7 +575,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "forge_gpu_memory_used_bytes",
+          "expr": "max by (gpu) (forge_gpu_memory_used_bytes)",
           "legendFormat": "used",
           "refId": "A",
           "range": true
@@ -585,7 +585,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "forge_gpu_memory_total_bytes",
+          "expr": "max by (gpu) (forge_gpu_memory_total_bytes)",
           "legendFormat": "total",
           "refId": "B",
           "range": true
@@ -646,7 +646,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "forge_gpu_temperature_celsius",
+          "expr": "max by (gpu, name) (forge_gpu_temperature_celsius)",
           "legendFormat": "{{name}}",
           "refId": "A",
           "range": true
@@ -707,7 +707,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "forge_gpu_power_watts",
+          "expr": "max by (gpu) (forge_gpu_power_watts)",
           "legendFormat": "draw",
           "refId": "A",
           "range": true
@@ -717,7 +717,7 @@
             "type": "prometheus",
             "uid": "prometheus"
           },
-          "expr": "forge_gpu_power_limit_watts",
+          "expr": "max by (gpu) (forge_gpu_power_limit_watts)",
           "legendFormat": "limit",
           "refId": "B",
           "range": true

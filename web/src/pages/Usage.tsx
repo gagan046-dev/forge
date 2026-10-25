@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { Link } from "react-router-dom";
 import { getUsage } from "../api/endpoints";
-import type { UsageBreakdownRow, UsageRange } from "../api/types";
+import type { QuotaRow, UsageBreakdownRow, UsageRange } from "../api/types";
 import { TimeSeriesChart } from "../components/TimeSeriesChart";
 import { EmptyState, ErrorBanner, Meter, PageHeader, Stat } from "../components/ui";
 import { fillBuckets } from "../lib/buckets";
@@ -14,6 +14,11 @@ const RANGES: { id: UsageRange; label: string; bucket: number; buckets: number }
   { id: "7d", label: "7 days", bucket: 86_400, buckets: 7 },
   { id: "30d", label: "30 days", bucket: 86_400, buckets: 30 },
 ];
+
+/** Fraction of the quota used; keys without a quota sort last. */
+function quotaShare(q: QuotaRow): number {
+  return q.quota ? q.used / q.quota : -1;
+}
 
 export function UsagePage() {
   const [rangeId, setRangeId] = useStoredState<UsageRange>("forge.usage.range", "24h");
@@ -104,17 +109,24 @@ export function UsagePage() {
               <table className="table quota-table">
                 <tbody>
                   {[...data.today_by_key]
-                    .sort((a, b) => b.used / (b.quota || 1) - a.used / (a.quota || 1))
+                    .sort((a, b) => quotaShare(b) - quotaShare(a))
                     .map((q) => (
                       <tr key={q.label}>
                         <td className="quota-name">{q.label}</td>
                         <td className="quota-bar">
-                          <Meter value={q.used} max={q.quota} />
+                          {q.quota !== null ? (
+                            <Meter value={q.used} max={q.quota} />
+                          ) : (
+                            <span className="muted small" title="The admin session is metered but never limited">
+                              no quota
+                            </span>
+                          )}
                         </td>
                         <td className="num mono">
-                          {formatCompact(q.used)} / {formatCompact(q.quota)}
+                          {formatCompact(q.used)}
+                          {q.quota !== null && <> / {formatCompact(q.quota)}</>}
                         </td>
-                        <td className="num mono muted">{q.quota > 0 ? formatPercent(q.used / q.quota) : "–"}</td>
+                        <td className="num mono muted">{q.quota ? formatPercent(q.used / q.quota) : "–"}</td>
                       </tr>
                     ))}
                 </tbody>

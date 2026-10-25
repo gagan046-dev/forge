@@ -29,6 +29,13 @@ describe("toApiError", () => {
     expect(describeError(err)).toBe("The GPU queue is full. Retry in 7s.");
   });
 
+  it("adds the Retry-After wait to every 429, whatever its type", () => {
+    const limited = toApiError(429, JSON.stringify({ error: { message: "Rate limit exceeded" } }), new Headers({ "Retry-After": "12" }));
+    expect(describeError(limited)).toBe("Rate limit reached for this key. Retry in 12s.");
+    const other = toApiError(429, JSON.stringify({ error: { message: "Slow down", type: "requests" } }), new Headers({ "Retry-After": "12" }));
+    expect(describeError(other)).toBe("Slow down. Retry in 12s.");
+  });
+
   it("maps FastAPI string details", () => {
     const err = toApiError(404, JSON.stringify({ detail: "Conversation not found" }), new Headers());
     expect(err.type).toBe("not_found");
