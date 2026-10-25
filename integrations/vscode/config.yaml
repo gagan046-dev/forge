@@ -1,0 +1,69 @@
+# Continue (VS Code) configuration that uses Forge for everything.
+#
+# Install: copy this file to %USERPROFILE%\.continue\config.yaml and put your Forge
+# API key in %USERPROFILE%\.continue\.env as  FORGE_API_KEY=fk_...
+# (create the key on the "API keys" page of http://forge.localhost:8082).
+# See README.md next to this file for the full steps and why each setting is here.
+name: Forge
+version: 1.0.0
+schema: v1
+
+models:
+  # Chat sidebar, inline edit (Ctrl+I) and "apply code block" all use the 7B coder.
+  - name: Forge Chat
+    provider: openai
+    model: forge-chat
+    apiBase: http://forge.localhost:8082/v1
+    apiKey: ${{ secrets.FORGE_API_KEY }}
+    roles:
+      - chat
+      - edit
+      - apply
+    defaultCompletionOptions:
+      contextLength: 8192
+      maxTokens: 2048
+      temperature: 0.2
+
+  # Tab autocomplete. The openai provider does not use a FIM endpoint: Continue
+  # renders the fill-in-the-middle prompt itself and streams it to /v1/completions.
+  # It picks the FIM format from the model name, and "forge-autocomplete" says
+  # nothing about Qwen, so the Qwen2.5-Coder FIM template is set explicitly.
+  - name: Forge Autocomplete
+    provider: openai
+    model: forge-autocomplete
+    apiBase: http://forge.localhost:8082/v1
+    apiKey: ${{ secrets.FORGE_API_KEY }}
+    roles:
+      - autocomplete
+    useLegacyCompletionsEndpoint: true
+    defaultCompletionOptions:
+      contextLength: 4096
+      temperature: 0
+      # Qwen2.5-Coder's special tokens: stop as soon as the model tries to start a
+      # new file or a new FIM section instead of finishing the gap.
+      stop:
+        - "<|endoftext|>"
+        - "<|fim_prefix|>"
+        - "<|fim_middle|>"
+        - "<|fim_suffix|>"
+        - "<|fim_pad|>"
+        - "<|repo_name|>"
+        - "<|file_sep|>"
+        - "<|im_start|>"
+        - "<|im_end|>"
+    autocompleteOptions:
+      template: "<|fim_prefix|>{{{prefix}}}<|fim_suffix|>{{{suffix}}}<|fim_middle|>"
+      debounceDelay: 300       # ms of typing pause before a request; Forge also drops superseded ones
+      maxPromptTokens: 2048    # half the 4096 context, leaving room for the completion
+
+  # Embeddings for @codebase / docs indexing.
+  - name: Forge Embeddings
+    provider: openai
+    model: forge-embed
+    apiBase: http://forge.localhost:8082/v1
+    apiKey: ${{ secrets.FORGE_API_KEY }}
+    roles:
+      - embed
+    embedOptions:
+      maxBatchSize: 32         # same batch size Forge's own RAG indexer uses
+      maxChunkSize: 512        # tokens; well inside nomic-embed-text's 2048 context

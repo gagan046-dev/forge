@@ -1,0 +1,21 @@
+{{- /*
+The Grafana dashboard "Forge" (dashboards/forge.json). Grafana's dashboard sidecar
+watches ConfigMaps labelled grafana_dashboard: "1" in every namespace and loads them,
+so the dashboard ships with the workload it describes. It queries the datasource with
+uid "prometheus" (provisioned in gitops/apps/monitoring.yaml).
+*/ -}}
+{{- if .Values.grafanaDashboard.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-forge
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fi.labels" (dict "root" . "component" "dashboard") | nindent 4 }}
+    grafana_dashboard: "1"
+  annotations:
+    grafana_folder: {{ .Values.grafanaDashboard.folder | quote }}
+data:
+  forge.json: |-
+    {{- .Files.Get "dashboards/forge.json" | nindent 4 }}
+{{- end }}

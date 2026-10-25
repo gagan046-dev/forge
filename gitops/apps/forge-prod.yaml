@@ -1,0 +1,46 @@
+# forge-prod.yaml - the PROD environment -> namespace forge-prod (http://forge.localhost:8082).
+#
+# Same sources as forge-dev, with values-prod.yaml (2 gateway replicas + PDB) and
+# values-prod-images.yaml, which changes ONLY through a promotion PR
+# (.github/workflows/promote.yaml copies the tested dev tags).
+#
+# Sync is automatic and selfHeal is on, but prune is OFF on purpose: if something
+# disappears from git by mistake, Argo CD only shows it as "requires pruning" and a
+# human decides (a prod database is never deleted by a typo).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: forge-prod
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  sources:
+    - repoURL: https://github.com/gagan046-dev/forge.git
+      targetRevision: main
+      path: charts/forge
+      helm:
+        releaseName: forge-prod
+        valueFiles:
+          - values-prod.yaml
+          - values-prod-images.yaml     # image tags, changed only by a promotion PR
+          - $values/gitops/models.yaml
+    - repoURL: https://github.com/gagan046-dev/forge.git
+      targetRevision: main
+      ref: values
+    - repoURL: https://github.com/gagan046-dev/forge.git
+      targetRevision: main
+      path: gitops/envs/prod
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: forge-prod
+  syncPolicy:
+    automated:
+      prune: false                      # deletions in prod need a human (manual sync with prune)
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff: {duration: 10s, factor: 2, maxDuration: 3m}

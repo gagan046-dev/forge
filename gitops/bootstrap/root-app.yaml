@@ -1,0 +1,41 @@
+# root-app.yaml - the "app of apps", the only Application applied by hand:
+#   kubectl apply -f gitops/bootstrap/root-app.yaml
+# It points Argo CD at gitops/apps/ on GitHub. Every file there is itself an Argo CD
+# Application, so adding a file and pushing is all it takes to deploy something new.
+#
+#   root (this file)
+#    +-- sealed-secrets   wave -3  controller that decrypts SealedSecrets (kube-system)
+#    +-- keda             wave -3  KEDA operator + ScaledObject CRD (keda)
+#    +-- monitoring       wave -2  Prometheus + Grafana (monitoring)
+#    +-- forge-inference  wave  0  Ollama, Redis, gpu-exporter, dashboard (forge-inference)
+#    +-- forge-dev        wave  0  charts/forge + values-dev  (forge-dev)
+#    +-- forge-prod       wave  0  charts/forge + values-prod (forge-prod)
+# The NVIDIA device plugin is NOT an app: scripts/up.ps1 applies cluster/device-plugin.yaml
+# before Argo CD exists, because the GPU must be visible before anything can use it.
+#
+# forge-inference shares wave 0 with the envs on purpose: its ScaledObject reports
+# Degraded until both gateways exist, and an earlier wave would wait for it forever.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+  # Deleting the root app also deletes the child Application objects (cascade).
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/gagan046-dev/forge.git
+    targetRevision: main
+    path: gitops/apps
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd                  # the child Application objects live in argocd
+  syncPolicy:
+    automated:
+      prune: true                      # a file removed from gitops/apps -> its app is removed
+      selfHeal: true                   # an Application edited by hand -> reverted
+    retry:
+      limit: 10
+      backoff: {duration: 10s, factor: 2, maxDuration: 3m}

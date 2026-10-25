@@ -1,0 +1,79 @@
+{{- /*
+NetworkPolicies for forge-inference: deny all incoming traffic, then allow only
+
+  gateway pods in forge-prod / forge-dev  -> ollama:11434, redis:6379, gpu-exporter:9400
+  Prometheus (monitoring namespace)       -> gpu-exporter:9400
+
+Nothing else (not even another pod in this namespace) may reach Ollama or Redis.
+Kubelet probes are always allowed. Egress stays open: the pull Job and the init
+container download models from registry.ollama.ai.
+*/ -}}
+{{- if .Values.networkPolicies.enabled }}
+{{- $np := .Values.networkPolicies }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fi.labels" (dict "root" . "component" "network-policy") | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ollama-from-gateways
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fi.labels" (dict "root" . "component" "network-policy") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/component: ollama}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        {{- include "fi.gatewayPeer" . | nindent 8 }}
+      ports:
+        - {protocol: TCP, port: 11434}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-redis-from-gateways
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fi.labels" (dict "root" . "component" "network-policy") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/component: redis}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        {{- include "fi.gatewayPeer" . | nindent 8 }}
+      ports:
+        - {protocol: TCP, port: 6379}
+{{- if .Values.gpuExporter.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gpu-exporter
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fi.labels" (dict "root" . "component" "network-policy") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/component: gpu-exporter}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        {{- include "fi.gatewayPeer" . | nindent 8 }}
+        # Prometheus scrapes /metrics; the gateways read /gpu for /api/status
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: {{ $np.monitoringNamespace }}}
+      ports:
+        - {protocol: TCP, port: 9400}
+{{- end }}
+{{- end }}

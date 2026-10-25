@@ -1,0 +1,29 @@
+# k3d cluster "forge": one node that can see the GPU.
+#   docker build -t forge/k3s-gpu:v1.35.9-k3s1 cluster/
+#   k3d cluster create --config cluster/k3d-config.yaml
+apiVersion: k3d.io/v1alpha5
+kind: Simple
+metadata:
+  name: forge
+servers: 1
+agents: 0                                   # one GPU, so one node is enough
+image: forge/k3s-gpu:v1.35.9-k3s1           # our image from cluster/Dockerfile
+kubeAPI:                                    # pin the API to localhost; the default
+  host: 127.0.0.1                           # "host.docker.internal" can resolve to the
+  hostIP: 127.0.0.1                         # Wi-Fi IP and time out
+  hostPort: "6448"                          # 6447 is gpu-hello's, so both can coexist
+ports:
+  # laptop:8082 -> k3d load balancer -> Traefik :80. Every Forge host
+  # (forge.localhost, forge-dev.localhost, grafana.localhost, argocd.localhost) uses it.
+  - port: 8082:80
+    nodeFilters: [loadbalancer]
+options:
+  runtime:
+    gpuRequest: all                         # same as "docker run --gpus all" for the node container
+  k3s:
+    extraArgs:
+      # Traefik stays (it is the ingress controller). metrics-server goes: nothing
+      # here uses resource metrics (KEDA serves its own external metrics API and no
+      # HPA scales on CPU), and it saves ~70 MB of RAM for Ollama.
+      - arg: --disable=metrics-server
+        nodeFilters: [server:*]

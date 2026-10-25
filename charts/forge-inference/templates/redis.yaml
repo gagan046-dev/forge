@@ -1,0 +1,93 @@
+{{- /*
+Redis: the GPU scheduler queue (forge:gpu:*) and the rate-limit / quota counters
+(forge:{env}:*) of BOTH environments. Small, password-protected, no persistence:
+queue tickets and lease keys are short-lived, and losing per-minute counters on a
+restart is harmless.
+The password comes from Secret forge-redis (key redis-password); the same value is
+sealed into forge-dev and forge-prod for the gateways.
+*/ -}}
+{{- $sel := include "fi.selectorLabels" (dict "root" . "component" "redis") }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"   # data store before its users
+  labels:
+    {{- include "fi.labels" (dict "root" . "component" "redis") | nindent 4 }}
+spec:
+  selector:
+    {{- $sel | nindent 4 }}
+  ports:
+    - {name: redis, port: 6379, targetPort: redis}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+  labels:
+    {{- include "fi.labels" (dict "root" . "component" "redis") | nindent 4 }}
+spec:
+  serviceName: redis
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- $sel | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fi.labels" (dict "root" . "component" "redis") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        {{- include "fi.podSecurity" (dict "uid" 999 "gid" 1000) | nindent 8 }}
+      containers:
+        - name: redis
+          image: {{ include "fi.image" .Values.redis.image }}
+          imagePullPolicy: {{ .Values.redis.image.pullPolicy }}
+          # The password goes into a config file in a RAM-backed emptyDir instead of the
+          # command line, where "ps" would show it. noeviction: a full Redis must refuse
+          # writes rather than silently drop queue tickets.
+          command: ["sh", "-c"]
+          args:
+            - |
+              umask 077
+              printf 'requirepass "%s"\n' "$REDIS_PASSWORD" > /conf/redis.conf
+              exec redis-server /conf/redis.conf \
+                --save "" --appendonly no --dir /data \
+                --maxmemory {{ .Values.redis.maxMemory }} --maxmemory-policy noeviction
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.redis.passwordSecret }}, key: redis-password}
+            - name: REDISCLI_AUTH                # lets the probes' redis-cli authenticate
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.redis.passwordSecret }}, key: redis-password}
+          ports:
+            - {name: redis, containerPort: 6379}
+          securityContext:
+            {{- include "fi.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.redis.resources | nindent 12 }}
+          readinessProbe:
+            exec: {command: ["redis-cli", "ping"]}
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            exec: {command: ["redis-cli", "ping"]}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 4
+          volumeMounts:
+            - {name: conf, mountPath: /conf}
+            - {name: data, mountPath: /data}
+      volumes:
+        - name: conf
+          emptyDir: {medium: Memory, sizeLimit: 1Mi}
+        - name: data
+          emptyDir: {sizeLimit: 256Mi}

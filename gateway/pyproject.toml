@@ -1,0 +1,63 @@
+[project]
+name = "forge-gateway"
+version = "0.1.0"
+description = "Forge gateway: OpenAI-compatible proxy with auth, quotas, a shared GPU queue and metering"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "fastapi==0.143.0",
+    "uvicorn==0.54.0",
+    "sqlalchemy[asyncio]==2.1.4",
+    "greenlet==3.5.6",
+    "asyncpg==0.32.0",
+    "alembic==1.20.0",
+    "pgvector==0.5.1",
+    "redis==8.1.0",
+    "httpx==0.28.1",
+    "prometheus-client==0.26.0",
+    "pydantic==2.14.1",
+    "pydantic-settings==2.15.0",
+    "itsdangerous==2.2.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "fakeredis==2.39.0",
+    "lupa==2.8",
+    "ruff==0.17.0",
+]
+
+[tool.uv]
+package = false
+# Every resolved package (including transitive ones) must be released on or before 2026-10-11.
+exclude-newer = "2026-10-12T00:00:00Z"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+asyncio_default_test_loop_scope = "function"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+extend-exclude = ["alembic/versions/__init__.py"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "ASYNC", "S", "SIM", "RUF"]
+ignore = [
+    "S101",   # asserts are how pytest works
+    "B008",   # FastAPI's Depends() in defaults is idiomatic
+    "RUF012", # SQLAlchemy/pydantic class attributes are not mutable-default bugs
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106", "S311", "S603", "S607", "ASYNC109", "ASYNC110"]  # tests poll on purpose
+# The usage queries splice in module-level SQL fragments and a whitelisted date_trunc unit only;
+# every client value is a bound parameter.
+"app/routes/admin.py" = ["S608"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+known-third-party = ["alembic"]  # the local alembic/ migrations dir is not the package

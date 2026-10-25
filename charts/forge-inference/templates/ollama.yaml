@@ -1,0 +1,141 @@
+{{- /*
+Ollama: the only GPU workload. One replica at most (one GPU), scaled 0 <-> 1 by KEDA.
+
+  PVC ollama-models (40Gi)   models survive restarts and scale-to-zero
+  Deployment ollama          Recreate, runtimeClassName nvidia, nvidia.com/gpu: 1
+  Service ollama:11434       the gateways call http://ollama.forge-inference:11434
+
+Sync waves (Argo CD): PVC + pull Job in wave 0, Deployment in wave 1, so models are
+downloaded before a new Ollama pod starts.
+*/ -}}
+{{- $sel := include "fi.selectorLabels" (dict "root" . "component" "ollama") }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ollama-models
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    # local-path binds on first use (WaitForFirstConsumer), so the PVC must share a
+    # wave with its first user (the pull Job); an earlier wave would wait forever.
+    argocd.argoproj.io/sync-wave: "0"
+    # Never delete 6+ GB of downloaded models with the release (Helm) or the app (Argo CD).
+    helm.sh/resource-policy: keep
+    argocd.argoproj.io/sync-options: Delete=false
+  labels:
+    {{- include "fi.labels" (dict "root" . "component" "ollama") | nindent 4 }}
+spec:
+  accessModes: [ReadWriteOnce]           # RWO = one node; the Job and the pod share that node
+  storageClassName: {{ .Values.ollama.storage.storageClassName }}
+  resources:
+    requests:
+      storage: {{ .Values.ollama.storage.size }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ollama
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fi.labels" (dict "root" . "component" "ollama") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- $sel | nindent 4 }}
+  ports:
+    - {name: http, port: 11434, targetPort: http}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ollama
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    {{- include "fi.labels" (dict "root" . "component" "ollama") | nindent 4 }}
+spec:
+  {{- /* With KEDA, replicas is left out on purpose: KEDA owns it, and a value here would
+         make every Helm upgrade or Argo CD sync wake the GPU up. */}}
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: 1
+  {{- end }}
+  revisionHistoryLimit: 3
+  strategy:
+    type: Recreate                       # the old pod must free the GPU before the new one starts
+  selector:
+    matchLabels:
+      {{- $sel | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fi.labels" (dict "root" . "component" "ollama") | nindent 8 }}
+      annotations:
+        # A changed gitops/models.yaml changes this hash -> new pod -> the init container
+        # makes sure the new models are on the volume.
+        checksum/models: {{ include "fi.modelsChecksum" . }}
+        checksum/pull-script: {{ .Files.Get "files/pull-models.sh" | sha256sum }}
+    spec:
+      runtimeClassName: nvidia           # start through nvidia-container-runtime
+      automountServiceAccountToken: false
+      enableServiceLinks: false          # keeps Kubernetes' OLLAMA_* service env vars away from Ollama's own
+      terminationGracePeriodSeconds: {{ .Values.ollama.terminationGracePeriodSeconds }}
+      securityContext:
+        {{- include "fi.podSecurity" (dict "uid" 1000 "fsGroup" 1000) | nindent 8 }}
+      initContainers:
+        - name: pull-models
+          image: {{ include "fi.image" .Values.ollama.image }}
+          imagePullPolicy: {{ .Values.ollama.image.pullPolicy }}
+          command: ["sh", "/scripts/pull-models.sh"]
+          env:
+            {{- include "fi.ollamaBaseEnv" . | nindent 12 }}
+            - name: FORGE_MODELS
+              value: {{ include "fi.modelNames" . | quote }}
+          securityContext:
+            {{- include "fi.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.ollama.pullResources | nindent 12 }}
+          volumeMounts:
+            - {name: models, mountPath: /data}
+            - {name: scripts, mountPath: /scripts, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      containers:
+        - name: ollama
+          image: {{ include "fi.image" .Values.ollama.image }}
+          imagePullPolicy: {{ .Values.ollama.image.pullPolicy }}
+          env:
+            {{- include "fi.ollamaBaseEnv" . | nindent 12 }}
+            {{- range $name, $value := .Values.ollama.env }}
+            - name: {{ $name }}
+              value: {{ $value | quote }}
+            {{- end }}
+          ports:
+            - {name: http, containerPort: 11434}
+          securityContext:
+            {{- include "fi.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.ollama.resources | nindent 12 }}
+          startupProbe:                  # GPU discovery takes a few seconds on WSL2
+            httpGet: {path: /api/version, port: http}
+            periodSeconds: 2
+            failureThreshold: 60
+          readinessProbe:                # the gateway's wake-up waits for this
+            httpGet: {path: /api/version, port: http}
+            periodSeconds: 3
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: {path: /api/version, port: http}
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6          # a model load can briefly slow the API down
+          volumeMounts:
+            - {name: models, mountPath: /data}
+            - {name: tmp, mountPath: /tmp}   # the root filesystem is read-only
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: ollama-models
+        - name: scripts
+          configMap:
+            name: ollama-pull-script
+        - name: tmp
+          emptyDir: {}

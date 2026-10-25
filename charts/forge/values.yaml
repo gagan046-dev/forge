@@ -1,0 +1,121 @@
+# values.yaml - defaults of the forge chart (one Forge environment per release).
+#
+# Value files layered on top (later wins):
+#   values-dev.yaml | values-prod.yaml               what differs per environment
+#   values-dev-images.yaml | values-prod-images.yaml image tags (CI / promotion PRs)
+#   gitops/models.yaml                               the model list (-> FORGE_MODELS_JSON)
+#
+#   helm template forge-dev charts/forge -n forge-dev -f charts/forge/values-dev.yaml \
+#     -f charts/forge/values-dev-images.yaml -f gitops/models.yaml
+#
+# Object names are fixed (forge-gateway, forge-web, forge-postgres): KEDA and the
+# NetworkPolicies of forge-inference address the gateway as
+# forge-gateway.<namespace>.svc:8000. Install one release per namespace.
+
+# dev | prod -> FORGE_ENV (prefixes the rate-limit keys in the shared Redis).
+environment: dev
+
+# Filled from gitops/models.yaml; passed to the gateway as FORGE_MODELS_JSON.
+models: []
+
+imagePullSecrets: []                  # e.g. [{name: ghcr-pull}]; GHCR images are public
+
+# ---------------------------------------------------------------- secrets
+# Created OUTSIDE this chart by SealedSecrets (gitops/envs/<env>/), never by Helm:
+#   forge-secrets: admin-password, session-secret, postgres-password
+#   forge-redis:   redis-password (the same value as in forge-inference)
+# Passwords go into connection URLs, so they must be URL-safe (scripts/seal-secrets.ps1
+# uses URL-safe random strings).
+secrets:
+  name: forge-secrets
+  redisName: forge-redis
+
+# ---------------------------------------------------------------- shared GPU tier
+inference:
+  namespace: forge-inference
+  ollamaUrl: http://ollama.forge-inference:11434
+  gpuExporterUrl: http://gpu-exporter.forge-inference:9400
+  redisHost: redis.forge-inference.svc
+  redisPort: 6379
+  redisDb: 0
+
+# ---------------------------------------------------------------- gateway
+gateway:
+  replicas: 1
+  image:
+    registry: ""
+    repository: forge-gateway
+    tag: dev                          # values-<env>-images.yaml sets the CI-built tag
+    pullPolicy: IfNotPresent
+  # Non-secret settings -> ConfigMap forge-config -> FORGE_* env vars (SPEC 2.1).
+  config:
+    maxInflight: 2                    # GPU slots across ALL gateways (= OLLAMA_NUM_PARALLEL)
+    maxQueue: 32
+    queueTimeoutSeconds: 120
+    wakeTimeoutSeconds: 240           # how long a request waits for a sleeping Ollama
+    idleSeconds: 600                  # keeps demand at 1 this long after the last request
+    defaultRpm: 120
+    defaultDailyTokens: 2000000
+    ragAllowedHosts: github.com,gitlab.com,codeberg.org
+    logLevel: INFO
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "1", memory: 768Mi}     # RAG indexing holds up to 30 MB of source text
+  # Scratch space for RAG "git clone --depth 1" (repos up to 30 MB of indexed files).
+  tmpSizeLimit: 2Gi
+  # Long SSE streams: give in-flight answers time to finish on rollout / scale-down.
+  terminationGracePeriodSeconds: 60
+  pdb:
+    enabled: false
+    minAvailable: 1
+  migration:
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+      limits: {cpu: 500m, memory: 256Mi}
+    backoffLimit: 4
+    activeDeadlineSeconds: 600
+
+# ---------------------------------------------------------------- web
+web:
+  replicas: 1
+  image:
+    registry: ""
+    repository: forge-web
+    tag: dev
+    pullPolicy: IfNotPresent
+  resources:
+    requests: {cpu: 10m, memory: 16Mi}
+    limits: {cpu: 200m, memory: 64Mi}
+
+# ---------------------------------------------------------------- postgres
+postgres:
+  image:
+    registry: ""
+    repository: pgvector/pgvector     # Postgres 17 + the pgvector extension
+    tag: 0.8.7-pg17-bookworm
+    pullPolicy: IfNotPresent
+  database: forge
+  user: forge
+  storage:
+    size: 5Gi
+    storageClassName: local-path
+  resources:
+    requests: {cpu: 50m, memory: 192Mi}
+    limits: {cpu: "1", memory: 768Mi}   # HNSW index builds need maintenance_work_mem
+
+# ---------------------------------------------------------------- ingress
+# Traefik (k3s' built-in ingress controller): / -> web, /v1 and /api -> gateway.
+# /internal and /metrics are NOT routed to the gateway (they fall through to the SPA).
+ingress:
+  enabled: true
+  className: traefik
+  host: forge-dev.localhost
+  annotations: {}
+  tls: []
+
+# ---------------------------------------------------------------- network policies
+networkPolicies:
+  enabled: true
+  ingressControllerNamespace: kube-system   # Traefik
+  kedaNamespace: keda                       # KEDA polls /internal/demand
+  monitoringNamespace: monitoring           # Prometheus scrapes /metrics

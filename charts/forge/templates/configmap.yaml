@@ -1,0 +1,27 @@
+{{- /*
+forge-config: every NON-secret gateway setting as a FORGE_* env var (SPEC 2.1).
+Secrets (database/redis passwords, admin password, session secret) come from Secrets,
+see _helpers.tpl "forge.envGatewaySecrets".
+*/ -}}
+{{- $c := .Values.gateway.config }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: forge-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "forge.labels" (dict "root" . "component" "gateway") | nindent 4 }}
+data:
+  FORGE_ENV: {{ .Values.environment | quote }}
+  FORGE_OLLAMA_URL: {{ .Values.inference.ollamaUrl | quote }}
+  FORGE_GPU_EXPORTER_URL: {{ .Values.inference.gpuExporterUrl | quote }}
+  FORGE_MODELS_JSON: {{ toJson .Values.models | quote }}
+  FORGE_MAX_INFLIGHT: {{ $c.maxInflight | quote }}
+  FORGE_MAX_QUEUE: {{ $c.maxQueue | quote }}
+  FORGE_QUEUE_TIMEOUT_S: {{ $c.queueTimeoutSeconds | quote }}
+  FORGE_WAKE_TIMEOUT_S: {{ $c.wakeTimeoutSeconds | quote }}
+  FORGE_IDLE_SECONDS: {{ $c.idleSeconds | quote }}
+  FORGE_DEFAULT_RPM: {{ $c.defaultRpm | quote }}
+  FORGE_DEFAULT_DAILY_TOKENS: {{ $c.defaultDailyTokens | int64 | quote }}
+  FORGE_RAG_ALLOWED_HOSTS: {{ $c.ragAllowedHosts | quote }}
+  FORGE_LOG_LEVEL: {{ $c.logLevel | quote }}

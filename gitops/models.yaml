@@ -1,0 +1,24 @@
+# models.yaml - THE list of models Forge serves (single source of truth).
+#
+# Read as a Helm value file by charts/forge-inference (what Ollama pulls) and by both
+# charts/forge envs (the gateway gets it as FORGE_MODELS_JSON). Argo CD passes it with
+# multi-source "$values/gitops/models.yaml"; locally: helm template ... -f gitops/models.yaml
+#
+# Change models through a pull request: on merge the pull Job downloads the new tags,
+# the Ollama pod restarts (its checksum annotation changes) and the gateways restart
+# with the new list.
+#
+# VRAM budget (RTX 4070 Laptop, ~6.8 GB free): 7B Q4 4.7 GB + 1.5B 1.0 GB + embed 0.3 GB + KV cache.
+models:
+  - alias: forge-chat            # what clients ask for
+    name: qwen2.5-coder:7b       # Ollama model tag (pulled into the Ollama PVC)
+    role: chat                   # chat | autocomplete | embedding
+    contextLength: 8192
+  - alias: forge-autocomplete
+    name: qwen2.5-coder:1.5b-base
+    role: autocomplete
+    contextLength: 4096
+  - alias: forge-embed
+    name: nomic-embed-text:v1.5
+    role: embedding
+    dimensions: 768

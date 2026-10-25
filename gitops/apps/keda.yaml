@@ -1,0 +1,68 @@
+# keda.yaml - KEDA 2.21.0 (Kubernetes Event-Driven Autoscaling).
+# It scales Ollama between 0 and 1 replicas: the ScaledObject "ollama" in
+# charts/forge-inference polls each gateway's /internal/demand (metrics-api trigger).
+# KEDA brings its own external-metrics API server, so the cluster needs no metrics-server.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: keda
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-3"   # CRDs (ScaledObject) before forge-inference
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://kedacore.github.io/charts
+    chart: keda
+    targetRevision: 2.21.0
+    helm:
+      releaseName: keda
+      valuesObject:
+        image:
+          pullPolicy: IfNotPresent
+        # Defaults reserve 100Mi each and allow 1000Mi; this cluster shares 16 GB with Ollama.
+        resources:
+          operator:
+            requests: {cpu: 50m, memory: 96Mi}
+            limits: {cpu: "1", memory: 384Mi}
+          metricServer:
+            requests: {cpu: 50m, memory: 64Mi}
+            limits: {cpu: "1", memory: 256Mi}
+          webhooks:
+            requests: {cpu: 20m, memory: 48Mi}
+            limits: {cpu: 500m, memory: 192Mi}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: keda
+  # KEDA rotates its own TLS certificates and writes the CA into these objects at runtime.
+  # Without this, Argo CD would see a permanent difference and keep "fixing" it.
+  ignoreDifferences:
+    - group: apiregistration.k8s.io
+      kind: APIService
+      jqPathExpressions: [.spec.caBundle]
+    - group: admissionregistration.k8s.io
+      kind: ValidatingWebhookConfiguration
+      jqPathExpressions: [".webhooks[]?.clientConfig.caBundle"]
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true            # KEDA's CRDs are too big for client-side apply
+      - RespectIgnoreDifferences=true
+    # KEDA's pods meet Pod Security "restricted" (checked against the rendered chart).
+    managedNamespaceMetadata:
+      labels:
+        app.kubernetes.io/part-of: forge
+        pod-security.kubernetes.io/enforce: restricted
+        pod-security.kubernetes.io/enforce-version: latest
+        pod-security.kubernetes.io/warn: restricted
+        pod-security.kubernetes.io/warn-version: latest
+        pod-security.kubernetes.io/audit: restricted
+        pod-security.kubernetes.io/audit-version: latest
+    retry:
+      limit: 5
+      backoff: {duration: 10s, factor: 2, maxDuration: 3m}

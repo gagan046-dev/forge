@@ -1,0 +1,57 @@
+{{- /*
+ollama-pull-<hash>: downloads every model of gitops/models.yaml onto the ollama-models
+volume, without the GPU and outside KEDA's control (values.yaml, modelPullJob, says why).
+The name contains the hash of the models list, so changing the list creates a new Job
+and Argo CD prunes the old one; an unchanged list leaves the finished Job alone.
+No ttlSecondsAfterFinished: Argo CD would see the deleted Job as missing and re-create it.
+*/ -}}
+{{- if and .Values.modelPullJob.enabled .Values.models }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ollama-pull-{{ include "fi.modelsChecksum" . | trunc 10 }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"    # wave 1 (the Deployment) waits until this Job completes
+  labels:
+    {{- include "fi.labels" (dict "root" . "component" "model-pull") | nindent 4 }}
+spec:
+  backoffLimit: {{ .Values.modelPullJob.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.modelPullJob.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "fi.labels" (dict "root" . "component" "model-pull") | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure           # "ollama pull" resumes partial downloads
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        {{- include "fi.podSecurity" (dict "uid" 1000 "fsGroup" 1000) | nindent 8 }}
+      containers:
+        - name: pull-models
+          image: {{ include "fi.image" .Values.ollama.image }}
+          imagePullPolicy: {{ .Values.ollama.image.pullPolicy }}
+          command: ["sh", "/scripts/pull-models.sh"]
+          env:
+            {{- include "fi.ollamaBaseEnv" . | nindent 12 }}
+            - name: FORGE_MODELS
+              value: {{ include "fi.modelNames" . | quote }}
+          securityContext:
+            {{- include "fi.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.ollama.pullResources | nindent 12 }}
+          volumeMounts:
+            - {name: models, mountPath: /data}
+            - {name: scripts, mountPath: /scripts, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: ollama-models
+        - name: scripts
+          configMap:
+            name: ollama-pull-script
+        - name: tmp
+          emptyDir: {}
+{{- end }}

@@ -1,0 +1,16 @@
+# values-prod.yaml - the PROD environment (namespace forge-prod, http://forge.localhost:8082).
+# Only what differs from values.yaml. Image tags reach prod only through a promotion PR
+# (values-prod-images.yaml).
+environment: prod
+
+gateway:
+  replicas: 2                         # one replica can restart while the other serves
+  pdb:
+    enabled: true                     # node drains / evictions keep at least one gateway
+    minAvailable: 1
+
+web:
+  replicas: 2
+
+ingress:
+  host: forge.localhost

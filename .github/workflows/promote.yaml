@@ -1,0 +1,86 @@
+# promote.yaml - promote an image tag from dev to prod with a pull request.
+#
+# Run it by hand: GitHub -> Actions -> promote -> "Run workflow"
+# (or: gh workflow run promote.yaml [-f tag=sha-1234567]).
+# Without a tag it takes the tag dev runs right now (charts/forge/values-dev-images.yaml).
+# It writes that tag into charts/forge/values-prod-images.yaml on a new branch and opens
+# a PR. Nothing reaches prod until a human reviews and MERGES that PR; Argo CD then
+# syncs forge-prod from main.
+#
+# forge-inference (Ollama, Redis, gpu-exporter) is one shared release, not per env,
+# so its image moves with dev (ci.yaml) and is not part of promotion.
+name: promote
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag to promote (sha-xxxxxxx). Empty = the tag dev runs now."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: promote
+  cancel-in-progress: false
+
+jobs:
+  open-pr:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write                 # push the promotion branch
+      pull-requests: write            # open the PR
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+      - name: Pick the tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          tag="$INPUT_TAG"
+          if [ -z "$tag" ]; then
+            tag=$(grep -m1 -oE 'sha-[0-9a-f]{7,40}' charts/forge/values-dev-images.yaml || true)
+          fi
+          if [ -z "$tag" ]; then
+            echo "::error::dev does not run a CI-built image yet (values-dev-images.yaml has no sha- tag)"
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: The tag must exist on ghcr.io for every image
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          owner=$(echo "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')
+          for img in forge-gateway forge-web; do
+            token=$(curl -fsS "https://ghcr.io/token?scope=repository:$owner/$img:pull" | jq -r '.token // empty' || true)
+            code=$(curl -s -o /dev/null -w '%{http_code}' -I \
+              -H "Authorization: Bearer $token" \
+              -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json" \
+              "https://ghcr.io/v2/$owner/$img/manifests/$TAG")
+            echo "$img:$TAG -> HTTP $code"
+            if [ "$code" != 200 ]; then
+              echo "::error::ghcr.io/$owner/$img:$TAG is not publicly pullable; prod could not start it"
+              exit 1
+            fi
+          done
+      - name: Write values-prod-images.yaml and open the PR
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          bash .github/scripts/write-image-values.sh forge charts/forge/values-prod-images.yaml "$TAG" prod
+          if git diff --quiet; then echo "prod already runs $TAG"; exit 0; fi
+          branch="promote/prod-$TAG"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$branch"
+          git commit -am "chore(prod): promote images $TAG"
+          git push --force origin "$branch"
+          gh pr create --base main --head "$branch" \
+            --title "Promote $TAG to prod" \
+            --body "Copies image tag \`$TAG\` (running in forge-dev) to \`charts/forge/values-prod-images.yaml\`. Merging deploys it to forge-prod via Argo CD."

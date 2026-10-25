@@ -1,0 +1,75 @@
+# argocd-values.yaml - settings for the Argo CD Helm chart (argo-cd 10.10.2 = Argo CD v3.5.4).
+#
+# Argo CD is the ONE thing installed by hand (it cannot deploy itself before it exists);
+# scripts/up.ps1 runs:
+#   helm repo add argo https://argoproj.github.io/argo-helm
+#   helm upgrade --install argocd argo/argo-cd --version 10.10.2 -n argocd --create-namespace \
+#     -f gitops/bootstrap/argocd-values.yaml
+#   kubectl apply -f gitops/bootstrap/root-app.yaml
+# Everything else is then deployed BY Argo CD from git (gitops/apps/).
+#
+# Local learning setup: plain HTTP UI at http://argocd.localhost:8082 (Traefik in front).
+
+global:
+  domain: argocd.localhost
+
+configs:
+  params:
+    # Serve the UI/API over plain HTTP; Traefik does not terminate TLS here.
+    server.insecure: true
+  cm:
+    # Poll git every 60 s (default 180 s) so a merged PR shows up quickly.
+    timeout.reconciliation: 60s
+    # App-of-apps ordering: by default Argo CD treats a child Application as healthy as
+    # soon as it exists, so sync waves in gitops/apps/ would not wait for anything.
+    # This health check (from the Argo CD docs) reports the child app's real health,
+    # so KEDA and sealed-secrets (wave -3, they bring CRDs) are Healthy before the apps
+    # that create ScaledObjects and SealedSecrets (wave 0) are applied.
+    resource.customizations.health.argoproj.io_Application: |
+      hs = {}
+      hs.status = "Progressing"
+      hs.message = ""
+      if obj.status ~= nil then
+        if obj.status.health ~= nil then
+          hs.status = obj.status.health.status
+          if obj.status.health.message ~= nil then
+            hs.message = obj.status.health.message
+          end
+        end
+      end
+      return hs
+
+# Dex = single sign-on connector. Not needed: we log in as the built-in "admin" user
+# (initial password in Secret argocd-initial-admin-secret).
+dex:
+  enabled: false
+
+# Not used here (no ApplicationSets, no notifications): saves ~150 MB of RAM.
+applicationSet:
+  replicas: 0
+notifications:
+  enabled: false
+
+server:
+  ingress:
+    enabled: true
+    ingressClassName: traefik          # k3s' built-in ingress controller
+    # hostname defaults to global.domain -> http://argocd.localhost:8082
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {cpu: 500m, memory: 512Mi}
+
+controller:
+  resources:
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "1", memory: 1Gi}
+
+repoServer:
+  resources:
+    requests: {cpu: 50m, memory: 128Mi}
+    limits: {cpu: "1", memory: 512Mi}
+
+redis:
+  resources:
+    requests: {cpu: 20m, memory: 32Mi}
+    limits: {cpu: 200m, memory: 128Mi}

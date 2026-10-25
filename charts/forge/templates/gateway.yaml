@@ -1,0 +1,129 @@
+{{- /*
+forge-gateway: the FastAPI gateway (OpenAI-compatible /v1, admin /api, /internal/demand
+for KEDA, /metrics for Prometheus). Port 8000.
+
+Argo CD sync order inside this app: Postgres (wave -1) -> migration Job (wave 1) ->
+gateway (wave 2), so a new gateway version never starts against an old schema.
+*/ -}}
+{{- $sel := include "forge.selectorLabels" (dict "root" . "component" "gateway") }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: forge-gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "forge.labels" (dict "root" . "component" "gateway") | nindent 4 }}
+automountServiceAccountToken: false     # the gateway never talks to the Kubernetes API
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: forge-gateway                   # KEDA polls forge-gateway.<namespace>.svc:8000
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "forge.labels" (dict "root" . "component" "gateway") | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- $sel | nindent 4 }}
+  ports:
+    - {name: http, port: 8000, targetPort: http}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: forge-gateway
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+  labels:
+    {{- include "forge.labels" (dict "root" . "component" "gateway") | nindent 4 }}
+spec:
+  replicas: {{ .Values.gateway.replicas }}
+  revisionHistoryLimit: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}   # never fewer ready gateways during an update
+  selector:
+    matchLabels:
+      {{- $sel | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "forge.labels" (dict "root" . "component" "gateway") | nindent 8 }}
+      annotations:
+        # New settings or a new models.yaml -> new hash -> rolling restart.
+        checksum/config: {{ include (print .Template.BasePath "/configmap.yaml") . | sha256sum }}
+        # Prometheus' kubernetes-pods job scrapes pods with these annotations.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: /metrics
+    spec:
+      serviceAccountName: forge-gateway
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ .Values.gateway.terminationGracePeriodSeconds }}
+      {{- include "forge.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- include "forge.podSecurity" (dict "uid" 10001) | nindent 8 }}
+      topologySpreadConstraints:          # spread replicas if the cluster ever gets more nodes
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- $sel | nindent 14 }}
+      containers:
+        - name: gateway
+          image: {{ include "forge.image" .Values.gateway.image }}
+          imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
+          ports:
+            - {name: http, containerPort: 8000}
+          envFrom:
+            - configMapRef: {name: forge-config}
+          env:
+            {{- include "forge.envGatewaySecrets" . | nindent 12 }}
+            - {name: HOME, value: /tmp}            # git (RAG cloning) wants a writable HOME
+          securityContext:
+            {{- include "forge.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.gateway.resources | nindent 12 }}
+          startupProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:                         # process alive? (no dependencies)
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:                        # database + Redis reachable?
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              # Keep serving a few seconds after removal from the Service endpoints, so
+              # Traefik stops sending new requests before uvicorn begins shutting down.
+              sleep: {seconds: 5}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}         # root filesystem is read-only
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: {{ .Values.gateway.tmpSizeLimit }}}
+{{- if .Values.gateway.pdb.enabled }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: forge-gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "forge.labels" (dict "root" . "component" "gateway") | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.gateway.pdb.minAvailable }}
+  selector:
+    matchLabels:
+      {{- $sel | nindent 6 }}
+{{- end }}

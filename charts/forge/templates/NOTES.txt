@@ -1,0 +1,9 @@
+Forge ({{ .Values.environment }}) in namespace {{ .Release.Namespace }}.
+{{- if not .Values.models }}
+
+WARNING: no models configured (FORGE_MODELS_JSON is "[]"). Pass: -f gitops/models.yaml
+{{- end }}
+
+Web console and API: http://{{ .Values.ingress.host }}:8082   (OpenAI base URL: http://{{ .Values.ingress.host }}:8082/v1)
+Required Secrets (from SealedSecrets): {{ .Values.secrets.name }} (admin-password, session-secret, postgres-password), {{ .Values.secrets.redisName }} (redis-password)
+  kubectl -n {{ .Release.Namespace }} get secret {{ .Values.secrets.name }} {{ .Values.secrets.redisName }}

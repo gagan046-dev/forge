@@ -1,0 +1,16 @@
+{{- /*
+The model download script, shared by the pull Job and Ollama's init container
+(files/pull-models.sh explains what it does).
+*/ -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ollama-pull-script
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"   # before the Job and the Deployment that mount it
+  labels:
+    {{- include "fi.labels" (dict "root" . "component" "ollama") | nindent 4 }}
+data:
+  pull-models.sh: |
+    {{- .Files.Get "files/pull-models.sh" | nindent 4 }}

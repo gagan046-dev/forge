@@ -1,0 +1,99 @@
+{{- /*
+forge-postgres: Postgres 17 with pgvector (API keys, usage events, conversations, RAG
+chunks with an HNSW index). A StatefulSet gives a stable name and its own 5Gi PVC.
+The gateway's Alembic migration runs CREATE EXTENSION vector itself.
+*/ -}}
+{{- $sel := include "forge.selectorLabels" (dict "root" . "component" "postgres") }}
+{{- $pgReady := list "pg_isready" "-U" .Values.postgres.user "-d" .Values.postgres.database "-h" "127.0.0.1" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: forge-postgres
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"   # data store before the apps that use it
+  labels:
+    {{- include "forge.labels" (dict "root" . "component" "postgres") | nindent 4 }}
+spec:
+  clusterIP: None                        # headless: DNS returns the pod IP
+  selector:
+    {{- $sel | nindent 4 }}
+  ports:
+    - {name: postgres, port: 5432, targetPort: postgres}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: forge-postgres
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+  labels:
+    {{- include "forge.labels" (dict "root" . "component" "postgres") | nindent 4 }}
+spec:
+  serviceName: forge-postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- $sel | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "forge.labels" (dict "root" . "component" "postgres") | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- include "forge.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        # uid/gid 999 = the "postgres" user of the Debian-based pgvector image
+        {{- include "forge.podSecurity" (dict "uid" 999 "fsGroup" 999) | nindent 8 }}
+      containers:
+        - name: postgres
+          image: {{ include "forge.image" .Values.postgres.image }}
+          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          ports:
+            - {name: postgres, containerPort: 5432}
+          env:
+            - {name: POSTGRES_DB, value: {{ .Values.postgres.database | quote }}}
+            - {name: POSTGRES_USER, value: {{ .Values.postgres.user | quote }}}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.secrets.name }}, key: postgres-password}
+            # data in a sub-folder of the volume (initdb wants an empty folder it owns)
+            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+          securityContext:
+            {{- include "forge.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
+          readinessProbe:
+            exec: {command: {{ toJson $pgReady }}}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            exec: {command: {{ toJson $pgReady }}}
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 4
+          volumeMounts:
+            - {name: data, mountPath: /var/lib/postgresql/data}
+            - {name: run, mountPath: /var/run/postgresql}   # unix socket + lock file
+            - {name: tmp, mountPath: /tmp}
+            - {name: shm, mountPath: /dev/shm}             # parallel query / HNSW build workers
+      volumes:
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: shm
+          emptyDir: {medium: Memory, sizeLimit: 256Mi}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- $sel | nindent 10 }}
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: {{ .Values.postgres.storage.storageClassName }}
+        resources:
+          requests:
+            storage: {{ .Values.postgres.storage.size }}

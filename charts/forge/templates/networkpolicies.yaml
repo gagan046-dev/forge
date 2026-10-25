@@ -1,0 +1,82 @@
+{{- /*
+NetworkPolicies for one Forge environment: deny all incoming traffic, then allow only
+
+  Traefik (kube-system)       -> forge-web:8080, forge-gateway:8000
+  KEDA (keda)                 -> forge-gateway:8000   (/internal/demand)
+  Prometheus (monitoring)     -> forge-gateway:8000   (/metrics)
+  gateway + migration Job     -> forge-postgres:5432
+
+The gateway's own egress (Ollama, Redis, gpu-exporter in forge-inference; GitHub for
+RAG clones) stays open; forge-inference's policies decide who may connect there.
+*/ -}}
+{{- if .Values.networkPolicies.enabled }}
+{{- $np := .Values.networkPolicies }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "forge.labels" (dict "root" . "component" "network-policy") | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-web-from-ingress
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "forge.labels" (dict "root" . "component" "network-policy") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/component: web}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: {{ $np.ingressControllerNamespace }}}
+      ports:
+        - {protocol: TCP, port: 8080}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "forge.labels" (dict "root" . "component" "network-policy") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/component: gateway}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values: {{ toJson (list $np.ingressControllerNamespace $np.kedaNamespace $np.monitoringNamespace) }}
+      ports:
+        - {protocol: TCP, port: 8000}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-postgres
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "forge.labels" (dict "root" . "component" "network-policy") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/component: postgres}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - {key: app.kubernetes.io/component, operator: In, values: [gateway, migrate]}
+      ports:
+        - {protocol: TCP, port: 5432}
+{{- end }}

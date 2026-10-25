@@ -1,0 +1,44 @@
+# forge-dev.yaml - the DEV environment -> namespace forge-dev (http://forge-dev.localhost:8082).
+#
+# Sources: charts/forge with values-dev.yaml + values-dev-images.yaml (CI writes the tag
+# of every main build) + $values/gitops/models.yaml, and gitops/envs/dev (Namespace with
+# Pod Security labels + the SealedSecrets forge-secrets and forge-redis).
+# Fully automatic: every push to main is applied, objects removed from git are deleted
+# (prune) and manual changes in the cluster are reverted (selfHeal).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: forge-dev
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  sources:
+    - repoURL: https://github.com/gagan046-dev/forge.git
+      targetRevision: main
+      path: charts/forge
+      helm:
+        releaseName: forge-dev
+        valueFiles:
+          - values-dev.yaml
+          - values-dev-images.yaml      # image tags, rewritten by CI on every main build
+          - $values/gitops/models.yaml
+    - repoURL: https://github.com/gagan046-dev/forge.git
+      targetRevision: main
+      ref: values
+    - repoURL: https://github.com/gagan046-dev/forge.git
+      targetRevision: main
+      path: gitops/envs/dev
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: forge-dev
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    retry:
+      limit: 5
+      backoff: {duration: 10s, factor: 2, maxDuration: 3m}

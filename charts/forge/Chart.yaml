@@ -1,0 +1,14 @@
+# forge: one Forge environment (gateway + web + Postgres + Ingress) per release.
+# forge-dev and forge-prod are two releases of this chart in their own namespaces;
+# both use the shared GPU tier from charts/forge-inference.
+apiVersion: v2
+name: forge
+description: Forge environment - OpenAI-compatible gateway, web console and Postgres (pgvector).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/gagan046-dev/forge
+sources:
+  - https://github.com/gagan046-dev/forge
+keywords: [llm, openai-compatible, fastapi, rag, pgvector]
+kubeVersion: ">=1.33.0-0"      # preStop "sleep" action (PodLifecycleSleepAction, on by default since 1.30, GA 1.34)

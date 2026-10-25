@@ -1,0 +1,53 @@
+# NVIDIA device plugin (based on NVIDIA's static manifest for v0.20.1, as verified in gpu-hello).
+# It asks the driver how many GPUs exist and advertises them to the kubelet as the
+# resource "nvidia.com/gpu". Without it, Kubernetes has no idea a GPU exists.
+#
+# Applied by scripts/up.ps1 right after the cluster starts, BEFORE Argo CD, because
+# nothing that needs the GPU can be scheduled until the node advertises it:
+#   kubectl apply -f cluster/device-plugin.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-device-plugin
+  namespace: kube-system
+  labels:
+    app: nvidia-device-plugin
+    app.kubernetes.io/part-of: forge
+spec:
+  selector:
+    matchLabels:
+      app: nvidia-device-plugin
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: nvidia-device-plugin
+    spec:
+      runtimeClassName: nvidia              # the plugin itself needs the driver libraries (NVML)
+      priorityClassName: system-node-critical
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: nvidia-device-plugin
+          image: nvcr.io/nvidia/k8s-device-plugin:v0.20.1
+          env:
+            - name: FAIL_ON_INIT_ERROR      # crash loudly instead of silently advertising 0 GPUs
+              value: "true"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {cpu: 200m, memory: 128Mi}
+          volumeMounts:
+            - name: device-plugins          # the kubelet's socket directory for device plugins
+              mountPath: /var/lib/kubelet/device-plugins
+      volumes:
+        - name: device-plugins
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+            type: Directory

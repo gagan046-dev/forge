@@ -1,0 +1,14 @@
+# forge-inference: the shared GPU tier of Forge (one release, namespace forge-inference).
+#   Ollama (scaled 0 <-> 1 by KEDA), Redis (GPU queue + rate limits), gpu-exporter,
+#   NetworkPolicies and the Grafana "Forge" dashboard.
+apiVersion: v2
+name: forge-inference
+description: Ollama on the single GPU with scale-to-zero, the shared Redis and GPU monitoring for Forge.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/gagan046-dev/forge
+sources:
+  - https://github.com/gagan046-dev/forge
+keywords: [ollama, gpu, keda, scale-to-zero, llm]
+kubeVersion: ">=1.31.0-0"      # KEDA 2.21 supports Kubernetes 1.31+; the cluster runs 1.35

@@ -1,0 +1,65 @@
+{{- /*
+KEDA ScaledObject: scale-to-zero for the GPU.
+
+Every pollingInterval seconds KEDA calls GET <gateway>/internal/demand in each env
+namespace and reads the JSON field "demand" (queued + inflight + waking waiters +
+1 while the last request is younger than FORGE_IDLE_SECONDS).
+  demand > activationTargetValue (0) in ANY trigger -> scale 0 -> 1 (wake up)
+  demand = 0 in ALL triggers for cooldownPeriod     -> scale 1 -> 0 (frees the VRAM)
+Both gateways read the same Redis, so each one reports the demand of the whole GPU and
+the two triggers are redundant on purpose: either env alone can wake the GPU.
+
+What happens when one env's gateway is ABSENT (namespace not deployed, or no ready pod,
+so its URL fails with a DNS or connection error). Behaviour of KEDA v2.21.0
+(pkg/scaling/scale_handler.go getScaledObjectState + executor/scale_scaledobjects.go
+RequestScale):
+  - KEDA keeps working; it does not crash or stop evaluating the other trigger.
+  - Waking up still works: if the remaining gateway reports demand > 0 the object is
+    "active" and KEDA scales 0 -> 1 even though the other trigger errors.
+  - Scale-to-ZERO stops: when no trigger is active but one trigger errors, KEDA never
+    takes the scale-to-zero branch. With the fallback below the HPA keeps 1 replica
+    (fallback.replicas) after failureThreshold failed polls; if Ollama is already at 0
+    it stays at 0 until the next real demand.
+  - The ScaledObject gets condition Fallback=True, which Argo CD shows as Degraded.
+    That is deliberate: a missing gateway is a real misconfiguration worth seeing.
+Fix: remove the missing namespace from autoscaling.demandSources (values) and
+scale-to-zero works again with the remaining trigger.
+Why a fallback at all: if every gateway is unreachable (e.g. a broken release), keeping
+one Ollama replica is the safe side; requests that do arrive are not refused.
+*/ -}}
+{{- if .Values.autoscaling.enabled }}
+{{- if not .Values.autoscaling.demandSources }}
+{{- fail "autoscaling.demandSources must list at least one gateway namespace (or set autoscaling.enabled: false)" }}
+{{- end }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: ollama
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+  labels:
+    {{- include "fi.labels" (dict "root" . "component" "ollama") | nindent 4 }}
+spec:
+  scaleTargetRef:
+    name: ollama
+  minReplicaCount: 0
+  maxReplicaCount: 1                     # one GPU
+  pollingInterval: {{ .Values.autoscaling.pollingInterval }}
+  cooldownPeriod: {{ .Values.autoscaling.cooldownPeriod }}
+  fallback:
+    failureThreshold: {{ .Values.autoscaling.fallback.failureThreshold }}
+    replicas: {{ .Values.autoscaling.fallback.replicas }}
+  triggers:
+    {{- range .Values.autoscaling.demandSources }}
+    - type: metrics-api
+      name: demand-{{ . }}
+      metricType: AverageValue           # fallback requires AverageValue
+      metadata:
+        url: {{ printf "http://%s.%s.svc:%d%s" $.Values.autoscaling.gatewayService . (int $.Values.autoscaling.gatewayPort) $.Values.autoscaling.demandPath | quote }}
+        format: json
+        valueLocation: demand
+        targetValue: "1"
+        activationTargetValue: "0"
+    {{- end }}
+{{- end }}

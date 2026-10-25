@@ -1,0 +1,72 @@
+{{- /*
+gpu-exporter: nvidia-smi every few seconds -> :9400/metrics (Prometheus) and :9400/gpu
+(JSON for the gateway's /api/status and the web UI's System page).
+
+runtimeClassName: nvidia WITHOUT an nvidia.com/gpu request: the NVIDIA runtime still
+injects /dev/dxg, the driver libraries and nvidia-smi (NVIDIA_VISIBLE_DEVICES=all), but
+the scheduler keeps the only GPU free for Ollama.
+*/ -}}
+{{- if .Values.gpuExporter.enabled }}
+{{- $sel := include "fi.selectorLabels" (dict "root" . "component" "gpu-exporter") }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: gpu-exporter
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fi.labels" (dict "root" . "component" "gpu-exporter") | nindent 4 }}
+spec:
+  selector:
+    {{- $sel | nindent 4 }}
+  ports:
+    - {name: http, port: 9400, targetPort: http}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gpu-exporter
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "fi.labels" (dict "root" . "component" "gpu-exporter") | nindent 4 }}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      {{- $sel | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "fi.labels" (dict "root" . "component" "gpu-exporter") | nindent 8 }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9400"
+        prometheus.io/path: /metrics
+    spec:
+      runtimeClassName: nvidia
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        {{- include "fi.podSecurity" (dict "uid" 10001) | nindent 8 }}
+      containers:
+        - name: gpu-exporter
+          image: {{ include "fi.image" .Values.gpuExporter.image }}
+          imagePullPolicy: {{ .Values.gpuExporter.image.pullPolicy }}
+          env:
+            - {name: NVIDIA_VISIBLE_DEVICES, value: all}
+            - {name: NVIDIA_DRIVER_CAPABILITIES, value: utility}
+            - {name: FORGE_POLL_SECONDS, value: {{ .Values.gpuExporter.pollSeconds | quote }}}
+          ports:
+            - {name: http, containerPort: 9400}
+          securityContext:
+            {{- include "fi.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.gpuExporter.resources | nindent 12 }}
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 20
+{{- end }}

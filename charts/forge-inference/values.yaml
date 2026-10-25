@@ -1,0 +1,117 @@
+# values.yaml - defaults of the forge-inference chart (the shared GPU tier).
+#
+# Value files layered on top (later wins):
+#   values-images.yaml      image tags of Forge's own images (written by CI)
+#   gitops/models.yaml      THE list of models (single source of truth, see below)
+#
+#   helm template forge-inference charts/forge-inference -n forge-inference \
+#     -f charts/forge-inference/values-images.yaml -f gitops/models.yaml
+
+# ---------------------------------------------------------------- models
+# Filled from gitops/models.yaml. Each entry: {alias, name, role, contextLength|dimensions}.
+# Only "name" (the Ollama tag) matters here: those are pulled onto the volume.
+# Empty by default so the chart lints on its own; a real install always passes models.yaml.
+models: []
+
+# ---------------------------------------------------------------- ollama
+ollama:
+  image:
+    registry: ""
+    repository: ollama/ollama
+    tag: "0.40.2"                     # same version verified on this GPU in gpu-hello
+    pullPolicy: IfNotPresent
+  # Section 1 of the SPEC: tuned for 8 GB of VRAM (7B chat + 1.5B autocomplete + embeddings).
+  env:
+    OLLAMA_FLASH_ATTENTION: "1"       # less VRAM per token of context
+    OLLAMA_KV_CACHE_TYPE: q8_0        # half-size KV cache, negligible quality loss
+    OLLAMA_NUM_PARALLEL: "2"          # matches FORGE_MAX_INFLIGHT=2 in the gateway
+    OLLAMA_MAX_LOADED_MODELS: "3"     # all three models can stay resident
+    OLLAMA_KEEP_ALIVE: 30m
+    OLLAMA_CONTEXT_LENGTH: "8192"
+  storage:
+    size: 40Gi
+    storageClassName: local-path      # k3s' built-in provisioner (a folder on the node)
+  resources:
+    requests: {cpu: "1", memory: 2Gi}
+    limits:
+      memory: 10Gi                    # weights live in VRAM; RAM is for mmap + runners
+      nvidia.com/gpu: 1               # the line that makes this a GPU workload
+  pullResources:                      # init container and pull Job: network + disk only
+    requests: {cpu: 100m, memory: 256Mi}
+    limits: {cpu: "2", memory: 1Gi}
+  terminationGracePeriodSeconds: 30
+
+# A Job that downloads the models BEFORE the Ollama Deployment is (re)started.
+# Why not only the init container: a first download of ~6 GB takes many minutes, and
+# while nobody is asking for the GPU KEDA would scale the half-started pod back to zero,
+# killing the download. The Job does not use the GPU, is not scaled by KEDA, and
+# Argo CD's sync waves run it before the Deployment. The init container then finds every
+# model present and finishes in seconds (it still pulls anything missing, e.g. with
+# plain "helm install", where both start together).
+modelPullJob:
+  enabled: true
+  activeDeadlineSeconds: 7200         # 2 h for slow connections
+  backoffLimit: 6
+
+# KEDA ScaledObject: Ollama runs only when there is demand for the GPU.
+autoscaling:
+  enabled: true
+  pollingInterval: 5
+  cooldownPeriod: 60                  # seconds without demand before scaling to zero
+  # One metrics-api trigger per namespace with a Forge gateway. Each gateway reports the
+  # demand of the WHOLE GPU (they share Redis), so one reachable gateway is enough.
+  # If one of these namespaces has no gateway, read the fallback note in scaledobject.yaml
+  # and remove it from this list.
+  demandSources: [forge-prod, forge-dev]
+  demandPath: /internal/demand
+  gatewayService: forge-gateway
+  gatewayPort: 8000
+  # Used when a trigger has failed failureThreshold polls in a row (see scaledobject.yaml).
+  fallback:
+    failureThreshold: 3
+    replicas: 1
+
+# ---------------------------------------------------------------- redis
+# GPU scheduler queue + rate-limit counters, shared by the dev and prod gateways.
+# Persistence is off: queue tickets and counters are short-lived by design.
+redis:
+  image:
+    registry: ""
+    repository: redis
+    tag: 8.6.6-alpine
+    pullPolicy: IfNotPresent
+  maxMemory: 128mb
+  # Secret with key "redis-password" (from gitops/envs/inference/forge-redis.sealed.yaml).
+  passwordSecret: forge-redis
+  resources:
+    requests: {cpu: 20m, memory: 32Mi}
+    limits: {cpu: 300m, memory: 192Mi}
+
+# ---------------------------------------------------------------- gpu-exporter
+gpuExporter:
+  enabled: true
+  image:
+    registry: ""
+    repository: forge-gpu-exporter
+    tag: dev                          # values-images.yaml sets the CI-built GHCR tag
+    pullPolicy: IfNotPresent
+  pollSeconds: 5
+  resources:
+    requests: {cpu: 10m, memory: 24Mi}
+    limits: {cpu: 200m, memory: 64Mi}
+
+# ---------------------------------------------------------------- network policies
+networkPolicies:
+  enabled: true
+  # Namespaces whose gateway pods may use Ollama, Redis and the exporter's /gpu.
+  gatewayNamespaces: [forge-prod, forge-dev]
+  gatewayPodLabels:
+    app.kubernetes.io/name: forge
+    app.kubernetes.io/component: gateway
+  monitoringNamespace: monitoring     # Prometheus scrapes gpu-exporter:9400
+
+# ---------------------------------------------------------------- grafana dashboard
+# A ConfigMap labelled grafana_dashboard: "1"; Grafana's sidecar (any namespace) loads it.
+grafanaDashboard:
+  enabled: true
+  folder: Forge

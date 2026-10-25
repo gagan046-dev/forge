@@ -1,0 +1,162 @@
+# monitoring.yaml - Prometheus + Grafana in namespace "monitoring", as ONE Application
+# with two Helm chart sources.
+#
+# Why these two charts and not kube-prometheus-stack: the Docker Desktop VM has 16 GB and
+# Ollama alone wants up to 10 GB of it. kube-prometheus-stack adds the Prometheus
+# Operator, Alertmanager, node-exporter (a privileged DaemonSet), kube-state-metrics and
+# admission webhooks - roughly 0.6-1 GB more RAM and a dozen CRDs - for features Forge
+# does not use (ServiceMonitors, alert routing). The plain "prometheus" chart scrapes
+# pods by their prometheus.io/* annotations, which is exactly what the gateway and the
+# gpu-exporter publish; with its optional sub-charts off it is a single Prometheus pod
+# (~200-400 MB). The "grafana" chart's sidecar loads dashboards from labelled ConfigMaps
+# in any namespace (charts/forge-inference ships the "Forge" dashboard that way).
+#
+#   prometheus 29.36.1 (Prometheus v3.15.0)   prometheus-community
+#   grafana    13.5.0  (Grafana 13.2.3)       grafana-community (grafana.github.io/helm-charts
+#                                             has published no new chart since January 2026)
+#
+# Grafana: http://grafana.localhost:8082 - no login. Grafana is READ-ONLY and fully
+# provisioned from git (datasource below, dashboards from ConfigMaps): visitors are
+# anonymous Viewers who may also use Explore for ad-hoc PromQL. No admin user is created,
+# so there is no password to generate, seal or leak. (With the chart's generated admin
+# password, every Argo CD render would produce a new random value and restart Grafana.)
+# To change a dashboard, edit charts/forge-inference/dashboards/forge.json and merge.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  sources:
+    # ------------------------------------------------------------ Prometheus
+    - repoURL: https://prometheus-community.github.io/helm-charts
+      chart: prometheus
+      targetRevision: 29.36.1
+      helm:
+        releaseName: prometheus
+        valuesObject:
+          # Everything except the server is off: not needed, and each costs RAM.
+          alertmanager: {enabled: false}
+          kube-state-metrics: {enabled: false}
+          prometheus-node-exporter: {enabled: false}   # privileged hostNetwork DaemonSet
+          prometheus-pushgateway: {enabled: false}
+          scrapeConfigs:
+            prometheus-pushgateway: {enabled: false}
+          configmapReload:
+            prometheus:
+              containerSecurityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: {drop: ["ALL"]}
+                seccompProfile: {type: RuntimeDefault}
+              resources:
+                requests: {cpu: 5m, memory: 16Mi}
+                limits: {cpu: 100m, memory: 64Mi}
+          server:
+            global:
+              scrape_interval: 15s
+              evaluation_interval: 30s
+            retention: 7d
+            retentionSize: 4GB                # stays inside the 5Gi volume
+            persistentVolume:
+              enabled: true
+              size: 5Gi
+              storageClass: local-path
+            securityContext:
+              runAsUser: 65534
+              runAsGroup: 65534
+              runAsNonRoot: true
+              fsGroup: 65534
+              seccompProfile: {type: RuntimeDefault}
+            containerSecurityContext:
+              allowPrivilegeEscalation: false
+              readOnlyRootFilesystem: true
+              capabilities: {drop: ["ALL"]}
+              seccompProfile: {type: RuntimeDefault}
+            resources:
+              requests: {cpu: 100m, memory: 256Mi}
+              limits: {cpu: "1", memory: 1Gi}
+    # ------------------------------------------------------------ Grafana
+    - repoURL: https://grafana-community.github.io/helm-charts
+      chart: grafana
+      targetRevision: 13.5.0
+      helm:
+        releaseName: grafana
+        valuesObject:
+          testFramework: {enabled: false}       # "helm test" pod: Argo CD has no test step
+          persistence: {enabled: false}         # dashboards and datasource come from git
+          ingress:
+            enabled: true
+            ingressClassName: traefik
+            hosts: [grafana.localhost]
+            path: /
+          grafana.ini:
+            server:
+              root_url: http://grafana.localhost:8082
+            analytics:
+              reporting_enabled: false
+              check_for_updates: false
+              check_for_plugin_updates: false
+            auth.anonymous:
+              enabled: true                     # local cluster: read-only dashboards without login
+              org_role: Viewer
+            auth:
+              disable_login_form: true          # there are no users to log in as
+            users:
+              allow_sign_up: false
+              viewers_can_edit: true            # Explore for Viewers; nothing is saved
+          env:
+            GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION: "true"
+          datasources:
+            datasources.yaml:
+              apiVersion: 1
+              datasources:
+                - name: Prometheus
+                  uid: prometheus                 # the Forge dashboard refers to this uid
+                  type: prometheus
+                  access: proxy
+                  url: http://prometheus-server.monitoring.svc
+                  isDefault: true
+                  jsonData:
+                    timeInterval: 15s             # = scrape_interval, for $__rate_interval
+          sidecar:
+            dashboards:
+              enabled: true
+              label: grafana_dashboard
+              labelValue: "1"
+              searchNamespace: ALL              # the dashboard lives in forge-inference
+              folderAnnotation: grafana_folder
+              provider:
+                foldersFromFilesStructure: true
+            resources:
+              requests: {cpu: 5m, memory: 48Mi}
+              limits: {cpu: 200m, memory: 128Mi}
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: "1", memory: 384Mi}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    managedNamespaceMetadata:
+      labels:
+        app.kubernetes.io/part-of: forge
+        pod-security.kubernetes.io/enforce: restricted
+        pod-security.kubernetes.io/enforce-version: latest
+        pod-security.kubernetes.io/warn: restricted
+        pod-security.kubernetes.io/warn-version: latest
+        pod-security.kubernetes.io/audit: restricted
+        pod-security.kubernetes.io/audit-version: latest
+    retry:
+      limit: 5
+      backoff: {duration: 10s, factor: 2, maxDuration: 3m}

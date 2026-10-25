@@ -1,0 +1,13 @@
+forge-inference {{ .Chart.Version }} in namespace {{ .Release.Namespace }}.
+{{- if not .Values.models }}
+
+WARNING: no models configured. Pass the model list: -f gitops/models.yaml
+{{- end }}
+
+Models: {{ include "fi.modelNames" . | default "(none)" }}
+Ollama: http://ollama.{{ .Release.Namespace }}:11434 (reachable only from the gateways)
+{{- if .Values.autoscaling.enabled }}
+Scale-to-zero: KEDA ScaledObject "ollama" polls {{ join ", " .Values.autoscaling.demandSources }}.
+  kubectl -n {{ .Release.Namespace }} get scaledobject ollama
+{{- end }}
+GPU metrics: kubectl -n {{ .Release.Namespace }} port-forward svc/gpu-exporter 9400 ; curl localhost:9400/gpu

@@ -1,0 +1,24 @@
+# Namespace forge-prod with Pod Security "restricted": the API server REJECTS any pod that
+# runs as root, keeps Linux capabilities, allows privilege escalation or lacks a
+# seccomp profile. Every pod Forge runs here is built to pass that bar.
+#
+# Wave -10: created before anything else in its Application.
+#
+# The other files in this folder are SealedSecrets written by scripts/seal-secrets.ps1:
+#   forge-secrets.sealed.yaml (forge-secrets: admin-password, session-secret, postgres-password) and forge-redis.sealed.yaml (forge-redis: redis-password)
+# They are encrypted for THIS cluster's sealed-secrets controller; a new cluster has a
+# new key pair, so up.ps1 re-seals them (and they must be committed and pushed again).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: forge-prod
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+  labels:
+    app.kubernetes.io/part-of: forge
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest

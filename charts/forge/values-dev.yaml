@@ -1,0 +1,11 @@
+# values-dev.yaml - the DEV environment (namespace forge-dev, http://forge-dev.localhost:8082).
+# Only what differs from values.yaml. Every push to main lands here automatically.
+environment: dev
+
+gateway:
+  replicas: 1
+  config:
+    logLevel: DEBUG
+
+ingress:
+  host: forge-dev.localhost

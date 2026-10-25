@@ -1,0 +1,46 @@
+{{- /*
+Ingress (Traefik):  browser / VS Code / other apps -> localhost:8082 -> k3d LB -> Traefik
+  /v1   -> forge-gateway:8000   (OpenAI-compatible API, Bearer keys)
+  /api  -> forge-gateway:8000   (admin API, session cookie)
+  /     -> forge-web:8080       (the SPA)
+/internal and /metrics have no rule, so from outside they reach the SPA (whose nginx
+answers 404 for them), never the gateway. KEDA and Prometheus use the Service directly.
+Prefix matching is per path element: /api matches /api and /api/keys, not /apix.
+*/ -}}
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: forge
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "forge.labels" (dict "root" . "component" "ingress") | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          {{- range list "/v1" "/api" }}
+          - path: {{ . }}
+            pathType: Prefix
+            backend:
+              service:
+                name: forge-gateway
+                port: {number: 8000}
+          {{- end }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: forge-web
+                port: {number: 8080}
+{{- end }}

@@ -1,0 +1,72 @@
+{{- /*
+forge-migrate: "python -m app.migrate" (alembic upgrade head) once per install/upgrade.
+
+  Argo CD: a Sync hook in wave 1 - after Postgres (wave -1) is healthy, before the
+           gateway (wave 2). Argo CD ignores the helm.sh/hook annotations when its own
+           hook annotation is present.
+  Helm:    post-install (Postgres must exist first) and pre-upgrade (schema before the
+           new gateway pods).
+The wait-for-postgres init container makes both orders safe even while Postgres starts.
+BeforeHookCreation keeps the last run's pod and logs until the next sync.
+*/ -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: forge-migrate
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/sync-wave: "1"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+    helm.sh/hook: post-install,pre-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+  labels:
+    {{- include "forge.labels" (dict "root" . "component" "migrate") | nindent 4 }}
+spec:
+  backoffLimit: {{ .Values.gateway.migration.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.gateway.migration.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "forge.labels" (dict "root" . "component" "migrate") | nindent 8 }}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- include "forge.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- include "forge.podSecurity" (dict "uid" 10001) | nindent 8 }}
+      initContainers:
+        - name: wait-for-postgres
+          image: {{ include "forge.image" .Values.postgres.image }}
+          imagePullPolicy: {{ .Values.postgres.image.pullPolicy }}
+          command: ["sh", "-c"]
+          args:
+            - |
+              for i in $(seq 1 90); do
+                pg_isready -h forge-postgres -p 5432 -U {{ .Values.postgres.user }} -d {{ .Values.postgres.database }} -q && exit 0
+                sleep 2
+              done
+              echo "postgres did not become ready in 3 minutes" >&2
+              exit 1
+          securityContext:
+            {{- include "forge.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.gateway.migration.resources | nindent 12 }}
+      containers:
+        - name: migrate
+          image: {{ include "forge.image" .Values.gateway.image }}
+          imagePullPolicy: {{ .Values.gateway.image.pullPolicy }}
+          command: ["python", "-m", "app.migrate"]
+          env:
+            {{- include "forge.envDatabase" . | nindent 12 }}
+          securityContext:
+            {{- include "forge.containerSecurity" . | nindent 12 }}
+          resources:
+            {{- toYaml .Values.gateway.migration.resources | nindent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
