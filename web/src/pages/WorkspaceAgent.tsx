@@ -11,7 +11,9 @@ import { DiffView } from "../components/DiffView";
 import { Markdown } from "../components/Markdown";
 import {
   AGENT_SYSTEM_PROMPT,
+  announcedWithoutAction,
   changeCount,
+  NUDGE,
   describeProject,
   emptyChangeset,
   narrative,
@@ -209,6 +211,7 @@ export function AgentPanel({
     abortRef.current = controller;
     const summary: string[] = [];
     const proposed: string[] = [];
+    let nudged = false;
     try {
       for (let step = 0; step < MAX_STEPS; step++) {
         let answer = "";
@@ -229,6 +232,11 @@ export function AgentPanel({
         proposed.push(...log.filter((l) => l.ok && !/^(read|search)/.test(l.label)).map((l) => l.label));
         updateAgent((t) => ({ ...t, steps: [...t.steps, { text: said, log }], live: undefined, writing: undefined }));
         messages.push({ role: "assistant", content: answer });
+        if (!nudged && announcedWithoutAction(answer, actions)) {
+          nudged = true;
+          messages.push({ role: "user", content: NUDGE });
+          continue;
+        }
         if (!needsFollowUp(actions, results)) break;
         if (step === MAX_STEPS - 1) {
           updateAgent((t) => ({ ...t, error: `Stopped after ${MAX_STEPS} rounds of reading. Ask again to continue.` }));

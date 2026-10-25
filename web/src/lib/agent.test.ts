@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyEdit, describeProject, emptyChangeset, narrative, needsFollowUp, parseActions, runActions, type AgentIO } from "./agent";
+import { announcedWithoutAction, applyEdit, describeProject, emptyChangeset, narrative, needsFollowUp, parseActions, runActions, type AgentIO } from "./agent";
 
 function fakeIO(files: Record<string, string>, dirs: string[] = []): AgentIO {
   return {
@@ -107,6 +107,23 @@ describe("search fallback and quoting", () => {
     expect(actions).toEqual([{ kind: "search", query: "health route" }]);
     const { results } = await runActions(actions, emptyChangeset(), fakeIO({ "app.py": "@app.route('/health')\ndef health():\n" }));
     expect(results[0]).toContain("app.py:1:");
+  });
+});
+
+describe("formats seen from the 7B model", () => {
+  it("parses actions without '<' inside a fence and tag-body forms", () => {
+    expect(parseActions('Run:\n```sh\nsearch query="health"\n```')).toEqual([{ kind: "search", query: "health" }]);
+    expect(parseActions("<search>health</search> then <read>app.py</read>")).toEqual([
+      { kind: "search", query: "health" },
+      { kind: "read", path: "app.py" },
+    ]);
+    expect(parseActions("We search query results in the UI.")).toEqual([]);
+  });
+
+  it("spots an announced action with no block", () => {
+    expect(announcedWithoutAction("I will search for the text health in the project.", [])).toBe(true);
+    expect(announcedWithoutAction("The route is in app.py line 6.", [])).toBe(false);
+    expect(announcedWithoutAction("I will search.", [{ kind: "search", query: "x" }])).toBe(false);
   });
 });
 

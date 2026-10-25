@@ -55,12 +55,24 @@ const OPEN = "(?:<|```)";
 const PATTERNS: { kind: Action["kind"]; re: RegExp }[] = [
   { kind: "write", re: new RegExp(`${OPEN}write\\s+${ATTR("path")}\\s*>\\n?([\\s\\S]*?)</write>`, "g") },
   { kind: "edit", re: new RegExp(`${OPEN}edit\\s+${ATTR("path")}\\s*>\\n?([\\s\\S]*?)</edit>`, "g") },
-  { kind: "mkdir", re: new RegExp(`<mkdir\\s+${ATTR("path")}\\s*/?>(?:</mkdir>)?`, "g") },
-  { kind: "delete", re: new RegExp(`<delete\\s+${ATTR("path")}\\s*/?>(?:</delete>)?`, "g") },
-  { kind: "move", re: new RegExp(`<move\\s+${ATTR("from")}\\s+${ATTR("to")}\\s*/?>(?:</move>)?`, "g") },
-  { kind: "read", re: new RegExp(`<read\\s+${ATTR("path")}\\s*/?>(?:</read>)?`, "g") },
-  { kind: "search", re: new RegExp(`<search\\s+${ATTR("query")}\\s*/?>(?:</search>)?`, "g") },
+  // One-line actions: `<read path="x"/>`, but also `read path="x"` at the start of a line (the
+  // model sometimes drops the "<" inside a code fence) and `<read>x</read>`.
+  ...(["mkdir", "delete", "read"] as const).flatMap((kind) => [
+    { kind, re: new RegExp(`(?:<|^[ \\t]*)${kind}\\s+${ATTR("path")}\\s*/?>?(?:</${kind}>)?`, "gm") },
+    { kind, re: new RegExp(`<${kind}>\\s*([^<\\n]+?)\\s*</${kind}>`, "g") },
+  ]),
+  { kind: "move", re: new RegExp(`(?:<|^[ \\t]*)move\\s+${ATTR("from")}\\s+${ATTR("to")}\\s*/?>?(?:</move>)?`, "gm") },
+  { kind: "search", re: new RegExp(`(?:<|^[ \\t]*)search\\s+${ATTR("query")}\\s*/?>?(?:</search>)?`, "gm") },
+  { kind: "search", re: /<search>\s*([^<\n]+?)\s*<\/search>/g },
 ];
+
+/** "I will search…" with no block: the model described an action instead of taking it. */
+export function announcedWithoutAction(text: string, actions: Action[]): boolean {
+  return actions.length === 0 && /\b(I will|I'll|Let me|I am going to)\b[^.\n]*\b(search|read|look|create|write|edit|add|update|delete|move)\b/i.test(text);
+}
+
+export const NUDGE =
+  "You described an action but did not output an action block. Output the block(s) now, exactly in the format from the instructions (for example <search query=\"word\"/>).";
 
 /** Removes a ``` fence the model wrapped around a whole file inside <write>. */
 function unfence(content: string): string {
