@@ -176,7 +176,8 @@ async def _prepare[BodyT: _Body](
         spec = llm.resolve(body.model)
         if spec.role not in roles:
             raise invalid_request(
-                f"Model '{spec.alias}' is a {spec.role} model and can't serve {endpoint} requests",
+                f"Model '{spec.alias}' is {'an' if spec.role[0] in 'aeiou' else 'a'} {spec.role} model "
+                f"and can't serve {endpoint} requests",
                 code="model_not_supported",
             )
         prompt_tokens = estimate(body)
