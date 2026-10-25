@@ -17,7 +17,7 @@ Point any OpenAI SDK, VS Code (Continue) or your other projects at `http://forge
 | Scale to zero | After 10 idle minutes Ollama is scaled to 0 and the VRAM is freed; the next request wakes it (about 15 s) |
 | Web console | Chat with history, "Ask my repo" (RAG with citations), API keys, usage, system/GPU status, connect snippets |
 | Chat attachments | Attach files or a whole folder (button or drag and drop). Binaries, `node_modules`/`.git`/build folders and files over 100 KB are skipped; up to 24k characters go into the message |
-| Editor (vibe-code workspace) | `/workspace`: project folders on the server (empty, or cloned from GitHub/GitLab/Codeberg), file tree, CodeMirror editor, AI-proposed edits shown as a diff before you apply them, ZIP download, git status/diff/commit/push |
+| Editor (vibe-code workspace) | `/workspace`: project folders on the server (empty, or cloned from GitHub/GitLab/Codeberg), file tree, CodeMirror editor, an **Agent** chat that reads/searches the project and creates, edits, moves and deletes files (every change reviewed as a diff before it is applied), single-file AI edits, ZIP download, git status/diff/commit/push |
 | RAG | Index a public Git repo into Postgres + pgvector, ask questions, get answers with `[n]` source citations |
 | Metering | Every request is recorded (tokens, queue time, time to first token, tokens/s) and exported to Prometheus |
 | Observability | Prometheus + Grafana dashboard "Forge" (GPU, queue, latency, tokens) |
