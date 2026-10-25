@@ -64,7 +64,7 @@ flowchart TB
 
 | Component | Version | Why chosen |
 |---|---|---|
-| Ollama | `0.40.2` | Simple model runner with an OpenAI-compatible API; same version verified on this GPU in gpu-hello |
+| Ollama | `0.40.2` | Inference engine (llama.cpp underneath) with an OpenAI-compatible API; runs the GGUF Q4_K_M models, keeps all three loaded, KV cache quantized to q8_0. Same version verified on this GPU in gpu-hello. Why not vLLM or llama-server: LEARNING-GUIDE 4.7a |
 | Chat model | `qwen2.5-coder:7b` (Q4, 5.02 GB) | Best coding quality that fits 8 GB next to the other two models |
 | Autocomplete model | `qwen2.5-coder:1.5b-base` (1.30 GB) | Base model required for FIM; fast (about 120 tok/s) |
 | Embedding model | `nomic-embed-text:v1.5` (0.32 GB, 768 dims) | Small, good quality, long context, needs task prefixes |

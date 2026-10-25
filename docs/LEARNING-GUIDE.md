@@ -210,6 +210,47 @@ It fits only with tuning, set as Ollama env vars in `charts/forge-inference/valu
 
 **Context overflow trap:** if a prompt is longer than the context window, Ollama silently cuts it. The gateway estimates the prompt tokens first and returns 400 `context_length_exceeded` instead.
 
+### 4.7a Quantization, GGUF and the inference engine
+
+**Why the models fit at all.** A model is billions of numbers (weights). Stored at 16 bits each, the 7B chat model alone would need about 15 GB, almost twice the RTX 4070's 8 GB. **Quantization** stores each weight in fewer bits (here about 4.5), which shrinks the model about 3.5x for a small quality loss:
+
+| Model | 16-bit (original) | What Forge runs | Format |
+|---|---|---|---|
+| qwen2.5-coder:7b | ~15 GB | **~4.7 GB** | GGUF, **Q4_K_M** |
+| qwen2.5-coder:1.5b-base | ~3 GB | **~1.0 GB** | GGUF, **Q4_K_M** |
+| nomic-embed-text:v1.5 | ~0.27 GB | ~0.27 GB | GGUF, F16 (small enough, left unquantized) |
+
+The quantization types are taken from the Ollama library's default tags; we did not quantize these models ourselves.
+
+**Reading a quant name like `Q4_K_M`:**
+- `Q4`: about 4 bits per weight.
+- `K`: "k-quant". Weights are quantized in small blocks, each with its own scale, so one outlier doesn't ruin a whole row.
+- `M`: medium mix. The most sensitive tensors (parts of attention and the feed-forward layers) keep more bits than the rest.
+
+The usual ladder is Q8_0 (near-lossless, half of F16), Q6_K, Q5_K_M, **Q4_K_M (the common default)**, Q3_K_M and Q2_K (noticeably worse). Each step down saves memory and speeds up generation (less memory to read per token) and costs some quality.
+
+**GGUF** is the single-file model format of llama.cpp. One file holds the quantized weights, the tokenizer, the chat template and the metadata. Ollama's models are GGUF files underneath.
+
+**Two different things get quantized in Forge:**
+1. **Weights:** pre-quantized Q4_K_M, downloaded that way.
+2. **The KV cache** (the memory of the conversation so far): `OLLAMA_KV_CACHE_TYPE=q8_0`, set by us at runtime, halves it.
+
+**The inference engine** is the program that loads the weights onto the GPU and generates tokens: batching, the KV cache, sampling, streaming. Forge uses **Ollama**, which runs **llama.cpp** underneath:
+
+```
+gateway --HTTP /v1/chat/completions--> Ollama (model manager, OpenAI-compatible API)
+                                         └─ llama.cpp (CUDA kernels; runs the GGUF Q4_K_M weights on the GPU)
+```
+
+| Engine | Why it wasn't (or was) chosen for Forge |
+|---|---|
+| **Ollama** (chosen) | Pulls models by tag, keeps several loaded at once, unloads when idle, OpenAI-compatible API, works on WSL2 with an 8 GB GPU. Verified on this GPU in gpu-hello |
+| llama.cpp `llama-server` | Same engine with full control (GPU layers, `--n-cpu-moe`, context size), but one model per process and no model pulling. Planned for the 30B terminal agent |
+| vLLM | The datacenter standard (PagedAttention, high throughput, AWQ/GPTQ quantization), but it wants Linux, plenty of VRAM, and one model per server: three models on 8 GB doesn't fit |
+| TGI / TensorRT-LLM | Server-class engines; same VRAM problem, more setup |
+
+**Not done in Forge (planned next):** downloading original Hugging Face weights, converting them with llama.cpp's `convert_hf_to_gguf.py`, quantizing with `llama-quantize` to several levels, and benchmarking size, speed and quality side by side.
+
 ### 4.8 API key hashing
 
 Keys look like `fk_` + 40 random URL-safe characters. The database stores only the **SHA-256 hash** plus a 10-character prefix for display. The plain key is returned once at creation. If the database leaks, the keys do not. SHA-256 (not bcrypt) is fine here because the keys are long random strings, not human passwords: brute force is infeasible and lookups stay fast on every request.
@@ -509,6 +550,11 @@ browser (/workspace)                    gateway pod                         PVC 
 | Cosine distance | Angle-based distance between vectors; 0 means same direction |
 | KV cache | GPU memory holding the context so far |
 | q8_0 | 8-bit quantization (here for the KV cache) |
+| Quantization | Storing weights (or the KV cache) in fewer bits to save memory and gain speed, for a small quality loss |
+| GGUF | llama.cpp's single-file model format: quantized weights + tokenizer + chat template + metadata |
+| Q4_K_M | 4-bit k-quant, "medium" mix: the common default quality/size trade-off |
+| Inference engine | Program that runs a model: loads weights onto the GPU, batches requests, manages the KV cache, samples tokens |
+| llama.cpp | C/C++ inference engine for GGUF models (CPU, CUDA, Metal); the engine inside Ollama |
 | TTFT | Time to first token |
 | tok/s | Generated tokens per second |
 | Lease | Redis key with TTL held while using a GPU slot |
