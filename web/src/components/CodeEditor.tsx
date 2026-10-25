@@ -5,6 +5,7 @@ import { javascript } from "@codemirror/lang-javascript";
 import { json } from "@codemirror/lang-json";
 import { markdown } from "@codemirror/lang-markdown";
 import { python } from "@codemirror/lang-python";
+import { indentUnit } from "@codemirror/language";
 import { yaml } from "@codemirror/lang-yaml";
 import { Compartment, EditorState, type Extension } from "@codemirror/state";
 import { keymap } from "@codemirror/view";
@@ -23,7 +24,7 @@ function languageFor(path: string): Extension {
     case "tsx":
       return javascript({ jsx: true, typescript: true });
     case "py":
-      return python();
+      return [python(), indentUnit.of("    ")]; // PEP 8
     case "json":
       return json();
     case "md":

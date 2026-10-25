@@ -465,6 +465,34 @@ All 33 findings from the first round plus two more were fixed; the retest passed
 
 ---
 
+## 7a. Chat attachments and the Editor (added later)
+
+**Attachments never touch the server as files.** The browser reads them (`web/src/lib/attachments.ts`), drops what a small model can't use (binaries, `node_modules`, `.git`, files over 100 KB, anything past a 24k-character budget) and wraps each one in the message text:
+
+```
+<file path="proj/src/calc.py">
+def add(a, b): ...
+</file>
+
+What does add(1, 2) return?
+```
+
+The gateway, the queue and the stored conversation stay unchanged: to them it is one longer user message. When a saved chat is reopened, `parseMessage` turns the `<file>` blocks back into the collapsible chips.
+
+**The Editor keeps real folders on a volume.** Git needs a real working tree, and a browser can't clone from GitHub (no CORS), so workspaces live on the server:
+
+```
+browser (/workspace)                    gateway pod                         PVC forge-workspaces
+ tree / CodeMirror / AI panel ──/api/workspaces/...──► app/workspaces.py ──► /workspaces/<name>/...
+ Propose edit ──/v1/chat/completions──► GPU queue ──► Ollama                (git clone/commit/push run here)
+```
+
+- **Path safety.** Every path goes through `_resolve`: no `..`, no absolute paths, no `.git`, no symlinks, and the result must stay inside the workspace. A test tries `../other-workspace/file` and expects 400.
+- **Git hardening.** The same `-c` flags as the RAG clone: https only, no redirects, symlinks checked out as plain files, hooks disabled. A cloned repo can't run code inside the gateway.
+- **The push token.** It travels in the request body, then to git only through `GIT_CONFIG_*` environment variables, never on the command line (where `ps` would show it), never in a log or on disk. Error text is scrubbed of the token and its base64 form.
+- **AI edits are proposals.** The model rewrites the whole file; `web/src/lib/diff.ts` (an LCS line diff) shows what changed; **Apply** only changes the editor; **Save** writes the file. You review before anything is written.
+- **Why a PVC and not `/tmp`.** `/tmp` is an `emptyDir` and disappears with the pod. The PVC keeps workspaces across restarts and rollouts. Its sync wave is the same as the gateway's, because `local-path` binds a claim only when a pod uses it.
+
 ## 8. Glossary
 
 | Term | Meaning |

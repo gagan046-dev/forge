@@ -443,8 +443,20 @@ class PushBody(BaseModel):
     token: str | None = Field(default=None, max_length=1000)
 
 
+# What git prints when the server wants credentials it didn't get (prompts are disabled).
+_AUTH_FAILURE = re.compile(r"could not read Username|Authentication failed|returned error: 40[13]|Permission .* denied")
+
+
 def _git_failed(code: str, exc: GitError) -> ForgeError:
-    return ForgeError(400, "invalid_request_error", f"git failed: {exc}", code=code)
+    message = f"git failed: {exc}"
+    if code == "push_failed" and _AUTH_FAILURE.search(str(exc)):
+        # GitHub answers a bad token and a missing (or private) repository the same way.
+        message = (
+            "Push was refused: authentication failed. Check that the token is valid and has write access "
+            "(GitHub fine-grained token: Contents read and write) and that the repository exists. "
+            f"({exc})"
+        )
+    return ForgeError(400, "invalid_request_error", message, code=code)
 
 
 def _require_repo(workspace: Path) -> None:

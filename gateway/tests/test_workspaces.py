@@ -194,3 +194,11 @@ async def test_token_never_appears_in_errors(client, tmp_path):
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "push_failed"
     assert TOKEN not in response.text
+
+
+def test_auth_failures_get_a_clear_push_message():
+    from app.workspaces import GitError, _git_failed
+
+    exc = GitError("fatal: could not read Username for 'https://github.com': terminal prompts disabled")
+    assert "authentication failed" in _git_failed("push_failed", exc).message
+    assert "authentication failed" not in _git_failed("push_failed", GitError("rejected: non-fast-forward")).message
