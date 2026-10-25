@@ -46,6 +46,11 @@ export function WorkspacePage() {
     if (!name && list && list.length > 0 && !creating) navigate(`/workspace/${list[0]!.name}`, { replace: true });
   }, [name, list, creating, navigate]);
 
+  // A workspace in the URL that no longer exists (deleted here or in another tab): leave it.
+  useEffect(() => {
+    if (name && list && !list.some((w) => w.name === name)) navigate("/workspace", { replace: true });
+  }, [name, list, navigate]);
+
   const current = list?.find((w) => w.name === name) ?? null;
 
   return (
@@ -83,6 +88,9 @@ export function WorkspacePage() {
             <DeleteWorkspace
               name={name}
               onDeleted={() => {
+                // Drop it from the list first: the "open the first workspace" effect would
+                // otherwise reopen the deleted one from the stale list.
+                setList((l) => l?.filter((w) => w.name !== name) ?? l);
                 navigate("/workspace", { replace: true });
                 refreshList();
               }}
@@ -95,8 +103,9 @@ export function WorkspacePage() {
         <CreateWorkspace
           onCreated={(w) => {
             setCreating(false);
-            refreshList();
+            setList((l) => [...(l ?? []).filter((x) => x.name !== w.name), w].sort((a, b) => a.name.localeCompare(b.name)));
             navigate(`/workspace/${w.name}`);
+            refreshList();
           }}
         />
       )}
@@ -111,7 +120,7 @@ export function WorkspacePage() {
           </div>
         </EmptyState>
       )}
-      {name && <WorkspaceEditor key={name} name={name} onGitChanged={refreshList} />}
+      {name && current && <WorkspaceEditor key={name} name={name} onGitChanged={refreshList} />}
     </div>
   );
 }
