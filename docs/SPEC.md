@@ -102,6 +102,7 @@ gateway/Dockerfile           python:3.12-slim based, non-root uid 10001, uvicorn
 
 ### 2.4 GPU scheduler, backend wake-up, LLM client
 - `Priority` IntEnum: `AUTOCOMPLETE=0, CHAT=1, BATCH=2` (lower runs first; FIFO within a priority).
+- Reserved slot: while any autocomplete request arrived in the last `FORGE_AUTOCOMPLETE_ACTIVE_S` (30 s), chat and batch requests may use only `MAX_INFLIGHT - FORGE_AUTOCOMPLETE_RESERVED_SLOTS` (default 1) slots, so a suggestion never waits behind long chat generations. When nobody is typing, chat uses every slot.
 - `GpuScheduler` (Redis, shared by every gateway replica in both envs; key prefix `forge:gpu:`):
   - each request enqueues a ticket in sorted set `forge:gpu:queue` with score `priority * 10**13 + enqueue_ms`;
   - it may start when it is among the first N tickets, where N = `MAX_INFLIGHT` − current leases;
@@ -205,6 +206,7 @@ Every 5 s it runs `nvidia-smi --query-gpu=name,utilization.gpu,memory.used,memor
   - Redis StatefulSet (small, with password from a secret; persistence off is fine);
   - gpu-exporter Deployment and Service;
   - NetworkPolicies: only gateways from forge-dev/forge-prod may reach ollama:11434 and redis:6379; Prometheus may scrape the exporter;
+  - monitoring namespace: default-deny ingress; Prometheus is reachable only from Grafana, Grafana only from Traefik (`gitops/envs/monitoring/`);
   - Grafana dashboard ConfigMap (label `grafana_dashboard: "1"`) with GPU and Forge panels.
 - `charts/forge/` (one env per release):
   - gateway Deployment (replicas from values), migration Job (Helm hook pre-install/pre-upgrade, or an Argo CD PreSync hook), Service `forge-gateway:8000`;

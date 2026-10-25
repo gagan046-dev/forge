@@ -96,6 +96,36 @@ async def test_max_inflight_is_shared_by_replicas(redis, fake_server):
     assert peak == 2
 
 
+async def test_slot_is_reserved_for_autocomplete_while_someone_types(redis):
+    # 2 slots, 1 reserved: with typing active, chat gets only one slot, so an
+    # autocomplete arriving during a chat flood starts at once instead of waiting.
+    scheduler = make_scheduler(redis, max_inflight=2, autocomplete_reserved_slots=1)
+    async with started(scheduler):
+        async with scheduler.slot(Priority.AUTOCOMPLETE, 1, "typing"):
+            pass  # marks autocomplete as active
+        async with scheduler.slot(Priority.CHAT, 2, "chat-1"):
+            second_chat = asyncio.create_task(_hold(scheduler, Priority.CHAT, 3))
+            await queued(scheduler, 1)
+            assert await scheduler.inflight() == 1  # second chat waits: one slot is held back
+            async with asyncio.timeout(1):
+                async with scheduler.slot(Priority.AUTOCOMPLETE, 4, "suggestion"):
+                    assert await scheduler.inflight() == 2
+        await second_chat
+
+
+async def test_chat_uses_every_slot_when_nobody_types(redis):
+    scheduler = make_scheduler(redis, max_inflight=2, autocomplete_reserved_slots=1)
+    async with started(scheduler), scheduler.slot(Priority.CHAT, 1, "chat-1"):
+        async with asyncio.timeout(1):
+            async with scheduler.slot(Priority.CHAT, 2, "chat-2"):
+                assert await scheduler.inflight() == 2
+
+
+async def _hold(scheduler: GpuScheduler, priority: Priority, principal: int) -> None:
+    async with scheduler.slot(priority, principal, "held"):
+        await asyncio.sleep(0.01)
+
+
 async def test_pubsub_wakes_waiter_on_another_replica_quickly(redis, fake_server):
     # Polling is slow here (2 s), so a fast hand-over proves the pub/sub notification works.
     a = make_scheduler(redis, poll_s=2.0)

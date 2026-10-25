@@ -113,6 +113,8 @@ def create_app(
             max_inflight=settings.max_inflight,
             max_queue=settings.max_queue,
             queue_timeout_s=settings.queue_timeout_s,
+            autocomplete_reserved_slots=settings.autocomplete_reserved_slots,
+            autocomplete_active_s=settings.autocomplete_active_s,
         )
         backend = BackendManager(settings, redis_client, http, scheduler)
         metering = Metering(redis_client, settings)

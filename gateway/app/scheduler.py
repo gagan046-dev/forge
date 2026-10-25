@@ -130,18 +130,26 @@ return {1, superseded}
 """
 )
 
-# KEYS: queue, leases   ARGV: prefix, ticket, max_inflight, lease_ttl_ms
+# KEYS: queue, leases, autocomplete_active
+# ARGV: prefix, ticket, max_inflight, lease_ttl_ms, reserved_slots, priority_span
 # Returns 1 acquired, 0 keep waiting, -1 ticket vanished (expired), -2 superseded.
 _ACQUIRE = (
     _LUA_HELPERS
     + """
 local queue, leases = KEYS[1], KEYS[2]
 local ticket = ARGV[2]
-if not redis.call('ZSCORE', queue, ticket) then
+local score = redis.call('ZSCORE', queue, ticket)
+if not score then
   if redis.call('EXISTS', prefix .. 'superseded:' .. ticket) == 1 then return -2 end
   return -1
 end
 local free = tonumber(ARGV[3]) - live_leases(leases)
+-- While someone is typing, keep slots free for autocomplete: priority alone does
+-- not help when every slot is already busy with a long chat generation.
+local is_autocomplete = math.floor(tonumber(score) / tonumber(ARGV[6])) == 0
+if not is_autocomplete and redis.call('EXISTS', KEYS[3]) == 1 then
+  free = free - tonumber(ARGV[5])
+end
 if free <= 0 then return 0 end
 local position = 0
 for _, id in ipairs(redis.call('ZRANGE', queue, 0, -1)) do
@@ -191,9 +199,15 @@ class GpuScheduler:
         lease_ttl_s: float = 15.0,
         heartbeat_s: float = 5.0,
         poll_s: float = 0.5,
+        autocomplete_reserved_slots: int = 1,
+        autocomplete_active_s: float = 30.0,
     ) -> None:
         self.redis = redis
         self.max_inflight = max_inflight
+        # Never reserve every slot, or chat could not run at all while someone types.
+        self.reserved_slots = max(0, min(autocomplete_reserved_slots, max_inflight - 1))
+        self.autocomplete_active_ms = int(autocomplete_active_s * 1000)
+        self.ac_active_key = prefix + "autocomplete_active"
         self.max_queue = max_queue
         self.queue_timeout_s = queue_timeout_s
         self.prefix = prefix
@@ -260,6 +274,9 @@ class GpuScheduler:
         started = time.monotonic()
         score = int(priority) * PRIORITY_SPAN + int(time.time() * 1000)
         supersede = priority == Priority.AUTOCOMPLETE
+        if supersede and self.reserved_slots:
+            # Someone is typing: hold a slot back from chat/batch for the next few seconds.
+            await self.redis.set(self.ac_active_key, "1", px=self.autocomplete_active_ms)
 
         admitted, superseded_old = await self._enqueue(
             keys=[self.queue_key, f"{self.prefix}ac:{principal_id}"],
@@ -321,8 +338,15 @@ class GpuScheduler:
             changed = self._changed
             result = int(
                 await self._acquire(
-                    keys=[self.queue_key, self.leases_key],
-                    args=[self.prefix, ticket, self.max_inflight, self.lease_ttl_ms],
+                    keys=[self.queue_key, self.leases_key, self.ac_active_key],
+                    args=[
+                        self.prefix,
+                        ticket,
+                        self.max_inflight,
+                        self.lease_ttl_ms,
+                        self.reserved_slots,
+                        PRIORITY_SPAN,
+                    ],
                 )
             )
             if result == 1:

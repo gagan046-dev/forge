@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     session_secret: SecretStr = Field(min_length=16)
 
     max_inflight: int = Field(default=2, ge=1)
+    # GPU slots kept free for autocomplete while anyone typed in the last N seconds.
+    autocomplete_reserved_slots: int = Field(default=1, ge=0)
+    autocomplete_active_s: float = Field(default=30, gt=0)
     max_queue: int = Field(default=32, ge=1)
     queue_timeout_s: float = Field(default=120, gt=0)
     wake_timeout_s: float = Field(default=240, gt=0)

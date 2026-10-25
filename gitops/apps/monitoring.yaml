@@ -139,6 +139,10 @@ spec:
           resources:
             requests: {cpu: 50m, memory: 128Mi}
             limits: {cpu: "1", memory: 384Mi}
+    # ------------------------------------------------------------ NetworkPolicies
+    - repoURL: https://github.com/gagan046-dev/forge.git
+      targetRevision: main
+      path: gitops/envs/monitoring
   destination:
     server: https://kubernetes.default.svc
     namespace: monitoring
