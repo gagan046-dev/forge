@@ -44,10 +44,12 @@ Rules:
 - <write> holds the WHOLE file, never a snippet. For a small change in a big file use <edit>; SEARCH must match the file exactly.
 - Writing a file creates its folders; use <mkdir> only for empty folders.
 - Paths are relative to the project root. Never use ../ or absolute paths.
-- You cannot run commands. Tell the user which command to run instead.
+- To find code, use <search query="word"/> with ONE identifier or word that appears in the code (e.g. health, def main, API_KEY), not a sentence. Never ask the user to run grep or find.
+- You cannot run commands. When the user must run something (install, tests), tell them the command.
 - When the task is done, end with a short summary and no read or search blocks.`;
 
-const ATTR = (name: string) => `${name}\\s*=\\s*"([^"\\n]*)"`;
+// Double or single quotes: the model uses both.
+const ATTR = (name: string) => `${name}\\s*=\\s*["']([^"'\\n]*)["']`;
 // The model sometimes opens a block with ``` instead of <, so both are accepted.
 const OPEN = "(?:<|```)";
 const PATTERNS: { kind: Action["kind"]; re: RegExp }[] = [
@@ -196,7 +198,10 @@ export async function runActions(actions: Action[], cs: Changeset, io: AgentIO):
         break;
       }
       case "search": {
-        const hits = await io.search(a.query);
+        let hits = await io.search(a.query);
+        // The model often searches for a phrase ("health route"); fall back to its longest word.
+        const words = a.query.split(/\W+/).filter((w) => w.length >= 3).sort((x, y) => y.length - x.length);
+        if (hits.length === 0 && words.length > 1) hits = await io.search(words[0]!);
         results.push(
           hits.length === 0
             ? `search "${a.query}": no matches`

@@ -101,6 +101,15 @@ describe("runActions", () => {
   });
 });
 
+describe("search fallback and quoting", () => {
+  it("accepts single quotes and retries a phrase with its longest word", async () => {
+    const actions = parseActions("<search query='health route'/>");
+    expect(actions).toEqual([{ kind: "search", query: "health route" }]);
+    const { results } = await runActions(actions, emptyChangeset(), fakeIO({ "app.py": "@app.route('/health')\ndef health():\n" }));
+    expect(results[0]).toContain("app.py:1:");
+  });
+});
+
 describe("applyEdit", () => {
   it("tolerates surrounding whitespace in SEARCH", () => {
     expect(applyEdit("x = 1\n", [{ search: "x = 1   ", replace: "x = 2 " }]).content).toBe("x = 2\n");
