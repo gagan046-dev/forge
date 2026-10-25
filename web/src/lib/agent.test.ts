@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { announcedWithoutAction, applyEdit, describeProject, emptyChangeset, narrative, needsFollowUp, parseActions, runActions, type AgentIO } from "./agent";
+import { actionsFor, announcedWithoutAction, applyEdit, describeProject, serializeActions, emptyChangeset, narrative, needsFollowUp, parseActions, runActions, type AgentIO } from "./agent";
 
 function fakeIO(files: Record<string, string>, dirs: string[] = []): AgentIO {
   return {
@@ -124,6 +124,51 @@ describe("formats seen from the 7B model", () => {
     expect(announcedWithoutAction("I will search for the text health in the project.", [])).toBe(true);
     expect(announcedWithoutAction("The route is in app.py line 6.", [])).toBe(false);
     expect(announcedWithoutAction("I will search.", [{ kind: "search", query: "x" }])).toBe(false);
+  });
+});
+
+describe("salvaging code blocks the model forgot to wrap (from a real session)", () => {
+  const answer = [
+    "First, let's create a Python script. We will name it main.py.",
+    "",
+    "Created `main.py`:",
+    "```python",
+    "# main.py",
+    "from sklearn.datasets import load_iris",
+    "print(load_iris().data.shape)",
+    "```",
+    "Created **requirements.txt**:",
+    "```plaintext",
+    "scikit-learn",
+    "```",
+    "Install with:",
+    "```sh",
+    "pip install -r requirements.txt",
+    "```",
+    "And a helper:",
+    "```python",
+    "# src/util.py",
+    "X = 1",
+    "```",
+  ].join("\n");
+
+  it("turns 'Created <file>:' + fence and '# <file>' comments into writes, but not shell snippets", () => {
+    const { actions, salvaged } = actionsFor(answer);
+    expect(salvaged).toBe(true);
+    expect(actions.map((a) => (a.kind === "write" ? a.path : a.kind))).toEqual(["main.py", "requirements.txt", "src/util.py"]);
+    expect((actions[1] as { content: string }).content).toBe("scikit-learn\n");
+  });
+
+  it("prefers real blocks and re-serializes actions in protocol form", () => {
+    const real = actionsFor('<write path="a.py">\nx = 1\n</write>\nCreated `b.py`:\n```python\ny = 2\n```');
+    expect(real).toEqual({ actions: [{ kind: "write", path: "a.py", content: "x = 1\n" }], salvaged: false });
+    expect(serializeActions(real.actions)).toBe('<write path="a.py">\nx = 1\n</write>');
+  });
+
+  it("nudges a build request answered with a plain code block, not a question", () => {
+    const code = "Here is the code:\n```python\nimport numpy as np\nprint(np.arange(10).sum())\n```";
+    expect(announcedWithoutAction(code, [], "build a project for this dataset")).toBe(true);
+    expect(announcedWithoutAction(code, [], "what does arange do?")).toBe(false);
   });
 });
 

@@ -40,13 +40,35 @@ replacement lines
 
 Rules:
 - First say in one or two sentences what you will do, then output the blocks.
+- Code you show in a normal \`\`\` block is NOT saved. Every file you create or change MUST be inside a <write> or <edit> block.
 - To change an existing file you have not seen, <read> it first and stop; its content comes back to you.
+- Only <read> files from the project file list. Libraries and packages (sklearn, react, ...) are not project files.
 - <write> holds the WHOLE file, never a snippet. For a small change in a big file use <edit>; SEARCH must match the file exactly.
 - Writing a file creates its folders; use <mkdir> only for empty folders.
 - Paths are relative to the project root. Never use ../ or absolute paths.
 - To find code, use <search query="word"/> with ONE identifier or word that appears in the code (e.g. health, def main, API_KEY), not a sentence. Never ask the user to run grep or find.
-- You cannot run commands. When the user must run something (install, tests), tell them the command.
-- When the task is done, end with a short summary and no read or search blocks.`;
+- You cannot run commands. Write the code first; afterwards tell the user which commands to run (install, tests).
+- When the task is done, end with a short summary and no read or search blocks.
+
+Example. User: "Create hello.py that prints hi, with a test"
+You:
+I'll create hello.py and a pytest test for it.
+<write path="hello.py">
+def greet():
+    return "hi"
+
+
+if __name__ == "__main__":
+    print(greet())
+</write>
+<write path="tests/test_hello.py">
+from hello import greet
+
+
+def test_greet():
+    assert greet() == "hi"
+</write>
+Summary: created hello.py and tests/test_hello.py. Run: pip install pytest && pytest`;
 
 // Double or single quotes: the model uses both.
 const ATTR = (name: string) => `${name}\\s*=\\s*["']([^"'\\n]*)["']`;
@@ -66,13 +88,24 @@ const PATTERNS: { kind: Action["kind"]; re: RegExp }[] = [
   { kind: "search", re: /<search>\s*([^<\n]+?)\s*<\/search>/g },
 ];
 
-/** "I will search…" with no block: the model described an action instead of taking it. */
-export function announcedWithoutAction(text: string, actions: Action[]): boolean {
-  return actions.length === 0 && /\b(I will|I'll|Let me|I am going to)\b[^.\n]*\b(search|read|look|create|write|edit|add|update|delete|move)\b/i.test(text);
+/**
+ * "I will search…" or a code block with no action: the model described or showed the work
+ * instead of doing it.
+ */
+export function announcedWithoutAction(text: string, actions: Action[], task = ""): boolean {
+  if (actions.length > 0) return false;
+  const asksForFiles = /\b(create|build|write|make|add|implement|generate|scaffold|project|file|code)\b/i.test(task);
+  return (
+    /\b(I will|I'll|Let me|I am going to|Let's|we will|we'll)\b[^.\n]*\b(search|read|look|create|write|edit|add|update|delete|move|build|start)\b/i.test(text) ||
+    /\b(created|updated|added|wrote)\b[^\n]*\.\w+/i.test(text) ||
+    // A plain code block is fine as an answer to a question, not to "build this".
+    (asksForFiles && /```[a-z]*\n[\s\S]{40,}?```/.test(text))
+  );
 }
 
 export const NUDGE =
-  "You described an action but did not output an action block. Output the block(s) now, exactly in the format from the instructions (for example <search query=\"word\"/>).";
+  "Nothing was saved: you did not output any action block. Do the work now. Put every file inside <write path=\"...\">...</write> " +
+  "(code in a normal ``` block is not saved), or use <search query=\"word\"/> / <read path=\"...\"/> to look first.";
 
 /** Removes a ``` fence the model wrapped around a whole file inside <write>. */
 function unfence(content: string): string {
@@ -104,6 +137,62 @@ export function parseActions(text: string): Action[] {
     }
   }
   return found.sort((a, b) => a.at - b.at).map((f) => f.action);
+}
+
+const FILE_NAME = /[\w.-]*[\w-]\.(?:py|ipynb|js|mjs|cjs|ts|tsx|jsx|json|md|txt|ya?ml|toml|ini|cfg|html|css|scss|sh|ps1|sql|go|rs|java|kt|rb|php|c|h|cpp|hpp|cs|env|gitignore)|Dockerfile|Makefile|Procfile/;
+const PATH_AT_END = new RegExp(`[\`*"'(]*((?:[\\w.-]+/)*(?:${FILE_NAME.source}))[\`*"')]*\\s*:?\\s*$`);
+const PATH_COMMENT = new RegExp(`^\\s*(?:#|//|--|<!--)\\s*((?:[\\w.-]+/)*(?:${FILE_NAME.source}))\\s*(?:-->)?\\s*$`);
+
+/**
+ * Fallback for answers with no write/edit blocks: the 7B model sometimes writes
+ * "Created main.py:" and then a normal ``` block. A fence counts as a file when the line just
+ * before it ends with a file name, or when its first line is a comment naming one.
+ * These still go through the review, so a wrong guess is only a proposal.
+ */
+export function salvageWrites(text: string): Action[] {
+  const out: Action[] = [];
+  const seen = new Set<string>();
+  // Group 2 (when present) is the line right above the fence, group 1 the one before it.
+  const fence = /(?:^|\n)([^\n]*)\n(?:([^\n]*)\n)?```[^\n]*\n([\s\S]*?)\n```/g;
+  for (const m of text.matchAll(fence)) {
+    const body = m[3]!;
+    const near = (m[2] ?? m[1]!).trim();
+    const fromLine = PATH_AT_END.exec(near)?.[1] ?? (m[2] !== undefined ? PATH_AT_END.exec(m[1]!.trim())?.[1] : undefined);
+    const fromComment = PATH_COMMENT.exec(body.split("\n")[0] ?? "")?.[1];
+    const path = fromLine ?? fromComment;
+    if (!path || seen.has(path)) continue;
+    seen.add(path);
+    out.push({ kind: "write", path: cleanPath(path), content: body.endsWith("\n") ? body : `${body}\n` });
+  }
+  return out;
+}
+
+/** The answer's actions, falling back to salvaged file blocks when it has no write/edit. */
+export function actionsFor(text: string): { actions: Action[]; salvaged: boolean } {
+  const actions = parseActions(text);
+  if (actions.some((a) => a.kind === "write" || a.kind === "edit")) return { actions, salvaged: false };
+  const salvaged = salvageWrites(text);
+  return salvaged.length ? { actions: [...actions, ...salvaged], salvaged: true } : { actions, salvaged: false };
+}
+
+/** Actions back in protocol form, so the chat history always shows the model the right format. */
+export function serializeActions(actions: Action[]): string {
+  return actions
+    .map((a) => {
+      switch (a.kind) {
+        case "write":
+          return `<write path="${a.path}">\n${a.content}</write>`;
+        case "edit":
+          return `<edit path="${a.path}">\n${a.blocks.map((b) => `<<<<<<< SEARCH\n${b.search}\n=======\n${b.replace}\n>>>>>>> REPLACE`).join("\n")}\n</edit>`;
+        case "move":
+          return `<move from="${a.from}" to="${a.to}"/>`;
+        case "search":
+          return `<search query="${a.query}"/>`;
+        default:
+          return `<${a.kind} path="${a.path}"/>`;
+      }
+    })
+    .join("\n");
 }
 
 /** The answer without its action blocks: what the chat shows as the agent's words. */
@@ -201,7 +290,7 @@ export async function runActions(actions: Action[], cs: Changeset, io: AgentIO):
       case "read": {
         const text = io.isDir(a.path) ? null : await current(cs, io, a.path);
         if (text === null) {
-          fail(label, "no such file");
+          fail(label, "not a file in this project (only files in the project list can be read; libraries need no reading)");
           break;
         }
         const shown = text.length > MAX_RESULT_CHARS ? `${text.slice(0, MAX_RESULT_CHARS)}\n… (truncated, ${text.length} chars)` : text;

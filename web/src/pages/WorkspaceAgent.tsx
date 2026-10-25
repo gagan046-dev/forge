@@ -18,8 +18,9 @@ import {
   emptyChangeset,
   narrative,
   needsFollowUp,
-  parseActions,
+  actionsFor,
   runActions,
+  serializeActions,
   type AgentIO,
   type Changeset,
   type StepLog,
@@ -209,8 +210,7 @@ export function AgentPanel({
 
     const controller = new AbortController();
     abortRef.current = controller;
-    const summary: string[] = [];
-    const proposed: string[] = [];
+    const turnLog: string[] = [];
     let nudged = false;
     try {
       for (let step = 0; step < MAX_STEPS; step++) {
@@ -225,14 +225,17 @@ export function AgentPanel({
             updateAgent((t) => ({ ...t, live: v.text, writing: v.writing }));
           },
         });
-        const actions = parseActions(answer);
+        const { actions, salvaged } = actionsFor(answer);
         const { results, log } = await runActions(actions, cs, io);
-        const said = narrative(answer);
-        summary.push(said);
-        proposed.push(...log.filter((l) => l.ok && !/^(read|search)/.test(l.label)).map((l) => l.label));
-        updateAgent((t) => ({ ...t, steps: [...t.steps, { text: said, log }], live: undefined, writing: undefined }));
-        messages.push({ role: "assistant", content: answer });
-        if (!nudged && announcedWithoutAction(answer, actions)) {
+        // Salvaged code blocks are already shown in the text; don't repeat them under it.
+        const said = salvaged ? answer.trim() : narrative(answer);
+        const stepLog = salvaged ? log.map((l) => (l.label.startsWith("write ") ? { ...l, label: `${l.label} (from code block)` } : l)) : log;
+        // The model's own turns, in canonical protocol form: it copies whatever format it sees.
+        const canonical = [narrative(answer), serializeActions(actions)].filter(Boolean).join("\n");
+        turnLog.push(canonical);
+        updateAgent((t) => ({ ...t, steps: [...t.steps, { text: said, log: stepLog }], live: undefined, writing: undefined }));
+        messages.push({ role: "assistant", content: canonical });
+        if (!nudged && announcedWithoutAction(answer, actions, text)) {
           nudged = true;
           messages.push({ role: "user", content: NUDGE });
           continue;
@@ -255,11 +258,9 @@ export function AgentPanel({
       setRunning(false);
     }
 
-    // Later turns get the gist, not the full file contents, to save context.
-    history.current.push(
-      { role: "user", content: text },
-      { role: "assistant", content: `${summary.filter(Boolean).join("\n") || "(no reply)"}${proposed.length ? `\n(Proposed: ${proposed.join("; ")})` : ""}` },
-    );
+    // Later turns see this turn with its action blocks (fitBudget drops the oldest turns first).
+    // Keeping only the prose taught the model to answer without blocks on later turns.
+    history.current.push({ role: "user", content: text }, { role: "assistant", content: turnLog.join("\n") || "(no reply)" });
     const next = { files: new Map(cs.files), folders: new Set(cs.folders), deletedFolders: new Set(cs.deletedFolders) };
     changesRef.current = next;
     setChanges(next);
